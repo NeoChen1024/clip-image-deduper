@@ -31,7 +31,13 @@ from .clip_encoding import CLIPImageEncoder, default_model_id
 )
 @click.option("--force-update", "-f", is_flag=True, default=False, help="Force update all images, ignoring modification times.")
 @click.option("--clip-model", "-m", default=default_model_id, help="CLIP model to use for encoding images.", show_default=True)
-@click.option("--device", "-c", default="cuda" if torch.cuda.is_available() else "cpu", help="Device to run the CLIP model on.", show_default=True)
+@click.option(
+    "--device",
+    "-c",
+    default="cuda" if torch.cuda.is_available() else "cpu",
+    help="Device to run the CLIP model on.",
+    show_default=True,
+)
 def main(image_dir: str, db_dir: str, force_update: bool, clip_model: str, device: str):
     print(f"Using CLIP model: {clip_model}, on device {device}")
     encoder = CLIPImageEncoder(model_id=clip_model, device=device)

@@ -52,7 +52,7 @@ def main(model_id: str, device: str, image_paths: List[str]):
     for image_path in t:
         try:
             image = PIL.Image.open(image_path).convert("RGB")
-            features = encoder.encode_image(image)
+            features = encoder.encode_image(image).tolist()
             t.write(f"Encoded features for the image {image_path}: {features}")
         except Exception as e:
             t.write(f"Error processing image {image_path}: {e}")
