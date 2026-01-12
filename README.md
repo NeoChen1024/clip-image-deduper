@@ -2,9 +2,8 @@
 
 This repo contains the following scripts:
 
-* [X] update_db.py: Update embedding when files' mtime changed, or embedding isn't present now.
-* [ ] dedupe_by_embedding.py: Do the actual dedupe process.
 * [ ] pic_dir_dedupe.py: dedupe according to my personal image directory structure and image sources.
+* [ ] generic_deduper.py: normal dedupe.
 
 # "db" structure
 

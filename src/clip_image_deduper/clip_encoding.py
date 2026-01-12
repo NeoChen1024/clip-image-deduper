@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """open_clip model and preprocessing setup for clip_image_deduper."""
-import open_clip
-import torch
 from typing import List
-import PIL.Image
-import numpy as np
+
 import click
+import numpy as np
+import open_clip
+import PIL.Image
+import torch
 import tqdm
 
 # default model
@@ -32,12 +33,9 @@ class CLIPImageEncoder:
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Compute cosine similarity between two feature tensors."""
     a_norm = a / np.linalg.norm(a, axis=-1, keepdims=True)
     b_norm = b / np.linalg.norm(b, axis=-1, keepdims=True)
-    similarity = np.dot(a_norm, b_norm.T) / (np.linalg.norm(a_norm) * np.linalg.norm(b_norm))
-    # normalize to [-1, 1]
-    return similarity
+    return a_norm @ b_norm.T
 
 
 @click.command()
@@ -49,13 +47,22 @@ def main(model_id: str, device: str, image_paths: List[str]):
     encoder = CLIPImageEncoder(model_id=model_id, device=device)
     print(f"Loaded model: {model_id} on device: {device}")
     t = tqdm.tqdm(image_paths)
+    features_list = []
     for image_path in t:
         try:
             image = PIL.Image.open(image_path).convert("RGB")
-            features = encoder.encode_image(image).tolist()
-            t.write(f"Encoded features for the image {image_path}: {features}")
+            features = encoder.encode_image(image)
+            features_list.append(features)
+            t.write(f"Encoded features for image #{t.n} {image_path}: {features}")
         except Exception as e:
-            t.write(f"Error processing image {image_path}: {e}")
+            t.write(f"Error processing image #{t.n} {image_path}: {e}")
+
+    # show similarity matrix
+    if len(features_list) >= 2:
+        features_array = np.stack(features_list, axis=0)
+        similarity_matrix = cosine_similarity(features_array, features_array)
+        print("Cosine Similarity Matrix:")
+        print(similarity_matrix)
 
 
 if __name__ == "__main__":

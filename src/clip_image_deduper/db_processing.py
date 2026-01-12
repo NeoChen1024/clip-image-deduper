@@ -2,15 +2,21 @@
 # -*- coding: utf-8 -*-
 
 # This module is for updating the "database" of clip_image_deduper. It scans a specified directory for valid images,
-# If an image's modification time is same or newer than the existing .json file, it calls a provided function to process the image.
+# If an image's modification time is same or newer than the existing .npz file, it calls a provided function to process the image.
 
+import json
 import math
 import os
-import PIL.Image
-from typing import Any, List, Callable, Dict
-from numpy import ndarray
-import tqdm
+from typing import Any, Callable, Dict, List, Tuple
+
 import click
+import numpy as np
+import PIL.Image
+import torch
+import tqdm
+from numpy import ndarray
+
+from .clip_encoding import CLIPImageEncoder, default_model_id
 
 
 def walk_directory_relative(directory: str):
@@ -32,7 +38,7 @@ def verify_image(image_path: str) -> bool:
         return False
 
 
-def update_database(
+def update_database_generic(
     image_dir: str,
     db_dir: str,
     process_image_func: Callable,
@@ -84,41 +90,86 @@ def update_database(
                 t.write(f"Error checking data file {relative_path}: {e}")
 
 
-def load_database(db_dir: str, data_extension: str, load_data_func: Callable) -> Dict[str, Any]:
+def load_database_generic(db_dir: str, data_extension: str, load_data_func: Callable) -> Tuple[List[str], List[Any]]:
     """Load all database files from the db directory."""
-    database = {}
-    relative_paths = walk_directory_relative(db_dir)
-    for relative_path in relative_paths:
+    file_paths = []
+    db_data = []
+    t = tqdm.tqdm(list(walk_directory_relative(db_dir)))
+    for relative_path in t:
         if relative_path.endswith(data_extension):
             db_file_path = os.path.join(db_dir, relative_path)
             try:
-                with open(db_file_path, "r") as f:
-                    data = load_data_func(f)
-                database[relative_path] = data
+                data = load_data_func(db_file_path)
+                file_paths.append(relative_path.removesuffix(data_extension))
+                db_data.append(data)
             except Exception as e:
-                print(f"Error loading database file {db_file_path}: {e}")
-    return database
+                t.write(f"Error loading database file {db_file_path}: {e}")
+    return file_paths, db_data
+
+
+def update_db(image_dir: str, db_dir: str, force_update: bool, clean_orphans: bool, clip_model: str, device: str):
+    print(f"Using CLIP model: {clip_model}, on device {device}")
+    encoder = CLIPImageEncoder(model_id=clip_model, device=device)
+
+    # don't need to catch exceptions here, they are handled in update_database_generic
+    def process_image(image_path: str, db_npz_path: str):
+        with PIL.Image.open(image_path) as img:
+            img = img.convert("RGB")
+            encoding = encoder.encode_image(img)
+
+        # save embedding as NumPy npz file
+        np.savez_compressed(db_npz_path, clip_embedding=encoding)
+
+    update_database_generic(
+        image_dir, db_dir, process_image, data_extension=".npz", force_update=force_update, clean_orphans=clean_orphans
+    )
+
+
+def load_db(db_dir: str) -> Tuple[List[str], List[ndarray]]:
+    def load_npz(f) -> ndarray:
+        data = np.load(f)
+        return data["clip_embedding"]
+
+    filenames, database = load_database_generic(db_dir, data_extension=".npz", load_data_func=load_npz)
+    return filenames, database  # could be huge
 
 
 @click.command()
 @click.option(
     "--image-dir",
     "-i",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
     required=True,
-    type=click.Path(exists=True, file_okay=False),
     help="Directory containing images to process.",
 )
-@click.option("--db-dir", "-d", required=True, type=click.Path(file_okay=False), help="Directory to store the database JSON files.")
-def main(image_dir: str, db_dir: str):
-    """CLI to update the image database."""
-    os.makedirs(db_dir, exist_ok=True)
-
-    def dummy_process_image(image_path: str, db_data_path: str):
-        # Placeholder for actual image processing logic
-        with open(db_data_path, "w") as f:
-            f.write(f"Processed {image_path}\n")
-
-    update_database(image_dir, db_dir, dummy_process_image, data_extension=".test", clean_orphans=True)
+@click.option(
+    "--db-dir",
+    "-d",
+    type=click.Path(file_okay=False, dir_okay=True),
+    required=True,
+    help="Directory to store the database JSON files.",
+)
+@click.option(
+    "--clean-orphans/--no-clean-orphans",
+    default=True,
+    help="Whether to remove orphaned database files that no longer have corresponding images.",
+    show_default=True,
+)
+@click.option("--force-update", "-f", is_flag=True, default=False, help="Force update all images, ignoring modification times.")
+@click.option("--clip-model", "-m", default=default_model_id, help="CLIP model to use for encoding images.", show_default=True)
+@click.option(
+    "--device",
+    "-c",
+    default="cuda" if torch.cuda.is_available() else "cpu",
+    help="Device to run the CLIP model on.",
+    show_default=True,
+)
+def main(image_dir: str, db_dir: str, force_update: bool, clean_orphans: bool, clip_model: str, device: str):
+    print("Starting database update...")
+    update_db(image_dir, db_dir, force_update, clean_orphans, clip_model, device)
+    print("Try loading the database...")
+    fn, db = load_db(db_dir)
+    print(f"Loaded {len(db)} entries in the database.")
 
 
 if __name__ == "__main__":

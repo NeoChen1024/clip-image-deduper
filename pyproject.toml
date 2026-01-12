@@ -24,4 +24,5 @@ target-version = ['py311']
 profile = "black"
 
 [project.scripts]
-clip-update-db = "clip_image_deduper.update_db:main"
+clip-image-deduper-db-test = "clip_image_deduper.db_processing:main"
+clip-image-generic-deduper = "clip_image_deduper.generic_deduper:main"
