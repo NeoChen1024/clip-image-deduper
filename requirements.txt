@@ -1,0 +1,10 @@
+torch
+rich
+pillow
+humanize
+accelerate
+torchvision
+tqdm
+safetensors
+click
+open_clip_torch

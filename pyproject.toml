@@ -1,0 +1,27 @@
+[project]
+name = "clip-image-deduper"
+version = "0.0.0a0"
+description = "Scripts for image deduplication using CLIP model."
+authors = [{name = "Neo_Chen", email = "chenkolei@gmail.com"}]
+dynamic = ["dependencies"]
+
+[build-system]
+# Minimum requirements for the build system to execute.
+requires = ["setuptools"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+# only search for modules in the src directory
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 132
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+
+[project.scripts]
+clip-update-db = "clip_image_deduper.update_db:main"
