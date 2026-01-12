@@ -37,32 +37,32 @@ def verify_image(image_path: str) -> bool:
         return False
 
 
-def update_database(image_dir: str, db_dir: str, process_image_func: Callable, force_update: bool = False):
+def update_database(image_dir: str, db_dir: str, process_image_func: Callable, data_extension: str, force_update: bool = False):
     """Update the database of images by processing each image in the specified directory."""
     t = tqdm.tqdm(list(walk_directory_relative(image_dir)))
     for relative_path in t:
         try:
             image_path = os.path.join(image_dir, relative_path)
-            db_json_path = os.path.join(db_dir, f"{relative_path}.json")
-
-            if not verify_image(image_path):
-                t.write(f"Skipping invalid image: {image_path}")
-                continue
+            data_path = os.path.join(db_dir, f"{relative_path}{data_extension}")
 
             image_mtime = get_image_modification_time(image_path)
-            if os.path.exists(db_json_path) and not force_update:
-                db_mtime = os.path.getmtime(db_json_path)
+            if os.path.exists(data_path) and not force_update:
+                db_mtime = os.path.getmtime(data_path)
             else:
                 db_mtime = -math.inf
                 # try to create parent directories
-                os.makedirs(os.path.dirname(db_json_path), exist_ok=True)
+                os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
             if image_mtime < db_mtime:
                 t.write(f"Skipping up-to-date image: {image_path}")
                 continue
 
+            if not verify_image(image_path):
+                t.write(f"Skipping invalid image: {image_path}")
+                continue
+
             t.write(f"Processing image: {image_path}")
-            process_image_func(image_path, db_json_path)
+            process_image_func(image_path, data_path)
         except Exception as e:
             t.write(f"Error processing image {relative_path}: {e}")
 

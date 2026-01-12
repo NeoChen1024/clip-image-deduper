@@ -7,7 +7,6 @@ from typing import List, Dict
 import tqdm
 import click
 import math
-import hashlib
 import PIL.Image
 import numpy as np
 import torch
@@ -38,26 +37,15 @@ def main(image_dir: str, db_dir: str, force_update: bool, clip_model: str, devic
     encoder = CLIPImageEncoder(model_id=clip_model, device=device)
 
     # don't need to catch exceptions here, they are handled in update_database
-    def process_image(image_path: str, db_json_path: str):
+    def process_image(image_path: str, db_npz_path: str):
         with PIL.Image.open(image_path) as img:
             img = img.convert("RGB")
             encoding = encoder.encode_image(img)
 
-        # Compute SHA-512 hash of the image file
-        sha512_hash = hashlib.sha512()
-        with open(image_path, "rb") as f:
-            while chunk := f.read(8192):
-                sha512_hash.update(chunk)
-        hash_hex = sha512_hash.hexdigest()
+        # save embedding as NumPy npz file
+        np.savez_compressed(db_npz_path, clip_embedding=encoding)
 
-        # Prepare data to save
-        data = {"sha512_hash": hash_hex, "clip_encoding": encoding.tolist()}
-
-        # Save to JSON
-        with open(db_json_path, "w") as f:
-            json.dump(data, f)
-
-    update_database(image_dir, db_dir, process_image, force_update=force_update)
+    update_database(image_dir, db_dir, process_image, data_extension=".npz", force_update=force_update)
 
 
 if __name__ == "__main__":
