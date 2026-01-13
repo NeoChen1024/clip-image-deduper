@@ -11,7 +11,7 @@ import PIL.Image
 import torch
 import tqdm
 
-from .similarity import cosine_similarity, euclidean_distance
+from .similarity import euclidean_distance
 
 # default model
 default_model_id = "hf-hub:timm/PE-Core-bigG-14-448"
@@ -25,6 +25,12 @@ class CLIPImageEncoder:
         self.device = device
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(model_id, device=device, jit=True, precision="fp32")
         self.tokenizer = open_clip.get_tokenizer(model_id)
+
+    # unload model from memory when done
+    def __del__(self):
+        self.model.to("cpu") # move to cpu before deleting
+        del self.model
+        torch.cuda.empty_cache()
 
     def encode_image(self, image: PIL.Image.Image) -> np.ndarray:
         """Encode an image using the CLIP model."""
@@ -56,10 +62,6 @@ def main(model_id: str, device: str, image_paths: List[str]):
     # show similarity matrix
     if len(features_list) >= 2:
         features_array = np.stack(features_list, axis=0)
-        similarity_matrix = cosine_similarity(features_array, features_array)
-        print("Cosine Similarity Matrix:")
-        print(similarity_matrix)
-
         distance_matrix = euclidean_distance(features_array, features_array)
         print("Euclidean Distance Matrix:")
         print(distance_matrix)

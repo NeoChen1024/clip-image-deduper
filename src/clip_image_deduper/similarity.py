@@ -5,16 +5,9 @@ import os
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
+import torch
 
-default_cosine_similarity_threshold = 0.97
 default_euclidean_distance_threshold = 0.5
-
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Normalized cosine similarity between two sets of vectors."""
-    a_norm = a / np.linalg.norm(a, axis=-1, keepdims=True)
-    b_norm = b / np.linalg.norm(b, axis=-1, keepdims=True)
-    return a_norm @ b_norm.T
 
 
 def euclidean_distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -28,25 +21,30 @@ def euclidean_distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     diff = a[:, np.newaxis, :] - b[np.newaxis, :, :]
     return np.linalg.norm(diff, axis=-1)
 
+@torch.no_grad()
+def euclidean_distance_torch_1_to_many(
+    a: np.ndarray,
+    b_torch: torch.Tensor,
+) -> np.ndarray:
+    """
+    a: (D,) or (1, D) numpy
+    b_torch: (N, D) torch tensor already on correct device
+    returns: (N,) numpy distances
+    """
+    a_t = torch.from_numpy(a).to(b_torch.device).float()
+    if a_t.ndim == 1:
+        a_t = a_t.unsqueeze(0)  # (1, D)
 
-def find_similar_images_cosine(
-    image_idx: int, image_embedding: np.ndarray, database: np.ndarray, threshold: float = default_cosine_similarity_threshold
-) -> List[Tuple[int, float]]:
-    """Find similar images in the database based on cosine similarity."""
-    # print(f"dimensions: i = {image_embedding.shape}, d = {database.shape}")
-    similarities = cosine_similarity(image_embedding, database)
-    matches = np.where(similarities >= threshold)
-    similar_images = [(int(m), float(similarities[m])) for m in matches[0]]
-    # remove self-match
-    similar_images = [(idx, sim) for idx, sim in similar_images if idx != image_idx]
-    return similar_images
+    # torch.cdist computes pairwise distances; result shape (1, N)
+    d = torch.cdist(a_t, b_torch, p=2)
+    return d[0].cpu().numpy()
 
 
 def find_similar_images_euclidean(
-    image_idx: int, image_embedding: np.ndarray, database: np.ndarray, threshold: float = default_euclidean_distance_threshold
+    image_idx: int, image_embedding: np.ndarray, database: torch.Tensor, threshold: float = default_euclidean_distance_threshold
 ) -> List[Tuple[int, float]]:
     """Find similar images in the database based on Euclidean distance."""
-    distances = euclidean_distance(image_embedding, database)
+    distances = euclidean_distance_torch_1_to_many(image_embedding, database)
 
     # For a single query vector vs database, distances has shape (1, N).
     # Squeeze to 1D so indexing and thresholding behave as expected.

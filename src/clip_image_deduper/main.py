@@ -17,9 +17,7 @@ import PIL.Image
 from .clip_encoding import default_model_id
 from .db_processing import load_db, update_db
 from .similarity import (
-    default_cosine_similarity_threshold,
     default_euclidean_distance_threshold,
-    find_similar_images_cosine,
     find_similar_images_euclidean,
 )
 
@@ -126,6 +124,7 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
         except Exception as e:
             t.write(f'Error moving file "{abs_path}" to trash: {e}')
 
+
 @click.command()
 @click.option(
     "--image-dir",
@@ -167,16 +166,8 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
 @click.option("--skip-update", is_flag=True, default=False, help="Skip the database update step.")
 @click.option("--dry-run", "-n", is_flag=True, default=False, help="Perform a dry run without making any changes.")
 @click.option(
-    "--cosine-similarity-threshold",
-    "-ct",
-    type=float,
-    default=default_cosine_similarity_threshold,
-    help="Cosine similarity threshold for considering images as duplicates.",
-    show_default=True,
-)
-@click.option(
-    "--euclidean-distance-threshold",
-    "-et",
+    "--threshold",
+    "-th",
     type=float,
     default=default_euclidean_distance_threshold,
     help="Euclidean distance threshold for considering images as duplicates.",
@@ -207,22 +198,23 @@ def main(
     device: str,
     skip_update: bool,
     dry_run: bool,
-    cosine_similarity_threshold: float,
-    euclidean_distance_threshold: float,
+    threshold: float,
     detection_method: str,
     trash_dir: str,
     keeping_logic: str,
 ):
     if not skip_update and not dry_run:
         update_db(image_dir, db_dir, force_update, clean_orphans, model_id, device)
+        
     print("Loading database...")
     image_paths, database = load_db(db_dir)
     print(f"Loaded {len(database)} entries in the database.")
 
     # put all image paths and embeddings into lists for easier processing
     print("Preparing embeddings...")
-    embeddings_db = np.stack(database, axis=0)  # shape (N, D)
+    embeddings_db = np.stack(database, axis=0)  # (N, D)
     print(f"Embeddings shape: {embeddings_db.shape}, memory size: {humanize.naturalsize(embeddings_db.nbytes, binary=True)}")
+    embeddings_torch = torch.from_numpy(embeddings_db).to(device).float()
 
     print("Finding duplicates...")
     duplicates = []  # list of [image_path, dupe_image_path, dupe_image_path2, ...]
@@ -251,17 +243,13 @@ def main(
         # Only compare this image against images that come after it in the
         # list to avoid checking each pair twice (i,j) and (j,i).
         # (upper-triangular comparison)
-        database_slice = embeddings_db[idx + 1 :]
-        if database_slice.size == 0:
+        database_slice_torch = embeddings_torch[idx + 1 :]
+        if database_slice_torch.size(0) == 0:
             continue
 
-        similar_images = []
-        if detection_method == "cosine":
-            similar_images = find_similar_images_cosine(idx, image_embedding, database_slice, threshold=cosine_similarity_threshold)
-        elif detection_method == "euclidean":
-            similar_images = find_similar_images_euclidean(
-                idx, image_embedding, database_slice, threshold=euclidean_distance_threshold
-            )
+        similar_images = find_similar_images_euclidean(
+            idx, image_embedding, database_slice_torch, threshold=threshold
+        )
         if similar_images:
             # Adjust indices from slice-local [0, ...) back to global indices.
             similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
@@ -270,5 +258,5 @@ def main(
     if dry_run:
         print("Dry run complete. No changes were made.")
         return
-    
+
     print(f"Dedupelication complete., processed {len(image_paths)} images, found {len(duplicates)} groups of duplicates.")
