@@ -62,7 +62,6 @@ def update_database_generic(
                 os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
             if image_mtime < db_mtime:
-                t.write(f"Skipping up-to-date image: {image_path}")
                 continue
 
             if not verify_image(image_path):

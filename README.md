@@ -2,8 +2,8 @@
 
 This repo contains the following scripts:
 
-* [ ] pic_dir_dedupe.py: dedupe according to my personal image directory structure and image sources.
-* [ ] generic_deduper.py: normal dedupe.
+* [ ] dedupe.py: normal dedupe.
+* [ ] pic_dir_import_dedupe.py: remove duplicate from importing dir.
 
 # "db" structure
 
@@ -15,6 +15,6 @@ is added to the original image filename, e.g. `image.jpg` -> `image.jpg.npy`)
 
 * [X] Support updating embedding when image files are changed.
 * [X] Support cleaning up db entries when image files are deleted.
-* [ ] Implement deduplication logic.
+* [X] Implement deduplication logic.
 * [ ] Batched embedding computation for better performance. (even better: async + multiprocessing)
 * [ ] Parallelized deduplication process.

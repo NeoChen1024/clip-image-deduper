@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+from shutil import move
+from typing import List, Optional
+
+import click
+import humanize
+import numpy as np
+import torch
+import tqdm
+import re
+
+import PIL.Image
+
+from .clip_encoding import default_model_id
+from .db_processing import load_db, update_db
+from .similarity import (
+    default_cosine_similarity_threshold,
+    default_euclidean_distance_threshold,
+    find_similar_images_cosine,
+    find_similar_images_euclidean,
+)
+
+keeping_modes = ["newest", "largest", "highest-quality", "pic-dir"]
+
+
+def sort_highest_quality(root_dir: str, image_paths: List[str]) -> List[str]:
+    # First, higher resolution images are preferred.
+    # When there's JPEG and PNG versions of the same image (at same resolution), prefer PNG.
+    # Then we keep the newest among the highest quality candidates.
+    assert len(image_paths) > 0
+    qualities = []
+    for img_path in image_paths:
+        full_path = os.path.join(root_dir, img_path)
+        try:
+            with PIL.Image.open(full_path) as img:
+                width, height = img.size
+                format_score = 1 if img.format == "PNG" else 0  # PNG preferred over JPEG
+                qualities.append((width * height, format_score, os.path.getmtime(full_path), img_path))
+        except Exception as e:
+            print(f"Error evaluating image quality for {img_path}: {e}")
+            qualities.append((0, 0, 0, img_path))  # Lowest quality on error
+    # Sort by resolution, format, modification time
+    qualities.sort(reverse=True)
+    image_paths_sorted = [q[3] for q in qualities]
+    return image_paths_sorted
+
+
+# dir structure: Anime, Wallpaper, VWallpaper
+# image sources according to preference (high to low): Pixiv (illust_id_pX.*), Yande.re (yande.re Y_ID *.*)
+#   Danbooru (__*__MD5.*), and Konachan (Konachan.com K_ID *.*), then others (e.g. Twitter/X or misc image sources)
+match_pixiv = re.compile(r"[0-9]+_p[0-9]+\..*")
+match_yande_re = re.compile(r"yande\.re [0-9]+ .*\..*")
+match_danbooru = re.compile(r"__.*__[0-9a-f]{32}\..*")
+match_konachan = re.compile(r"Konachan\.com - [0-9]+ .*\..*")
+
+
+def sort_image_sources(image_paths: List[str]) -> List[str]:
+    image_path_scores = []  # Tuple[int, str]
+    for image_path in image_paths:
+        score = 0
+        if match_pixiv.match(image_path):
+            score += 4
+        elif match_yande_re.match(image_path):
+            score += 3
+        elif match_danbooru.match(image_path):
+            score += 2
+        elif match_konachan.match(image_path):
+            score += 1
+        else:
+            score += 0
+        image_path_scores.append((score, image_path))
+    # Sort by score descending
+    image_paths_sorted = sorted(image_path_scores, key=lambda x: x[0], reverse=True)
+    return [p[1] for p in image_paths_sorted]
+
+
+def pic_dir_keeping_logic(root_dir: str, image_paths: List[str]) -> str:
+    # First, prefer to keep images in Wallpaper and VWallpaper:
+    wallpaper_images = [p for p in image_paths if "Wallpaper" in os.path.dirname(p)]  # image_path is relative path
+    if len(wallpaper_images) > 0:
+        # there's same images in wallpapers and Anime dir, keep the copies in wallpaper.
+        sources = sort_image_sources(wallpaper_images)
+        hq = sort_highest_quality(root_dir, wallpaper_images)
+        return sources[0]
+
+    # Else, keep from Anime or other dirs
+    sources = sort_image_sources(image_paths)
+    hq = sort_highest_quality(root_dir, image_paths)
+    return sources[0]
+
+
+def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping_logic: str, dry_run: bool):
+    os.makedirs(trash_dir, exist_ok=True)
+
+    # Determine which image to keep based on the keeping logic
+    if keeping_logic == "newest":
+        # add size to break ties
+        to_keep = max(dup_group, key=lambda p: os.path.getsize(os.path.join(root_dir, p)))
+        to_keep = max(dup_group, key=lambda p: os.path.getmtime(os.path.join(root_dir, p)))
+    elif keeping_logic == "largest":
+        # add mtime to break ties
+        to_keep = max(dup_group, key=lambda p: os.path.getmtime(os.path.join(root_dir, p)))
+        to_keep = max(dup_group, key=lambda p: os.path.getsize(os.path.join(root_dir, p)))
+    elif keeping_logic == "highest-quality":
+        to_keep = sort_highest_quality(root_dir, dup_group)[0]
+    elif keeping_logic == "pic-dir":
+        # Keeping logic based on directory structure and image source
+        to_keep = pic_dir_keeping_logic(root_dir, dup_group)
+    else:
+        raise ValueError(f"Unknown keeping logic: {keeping_logic}")
+
+    for img_path in dup_group:
+        abs_path = os.path.join(root_dir, img_path)
+        try:
+            if img_path != to_keep:
+                dest_path = os.path.join(trash_dir, os.path.basename(img_path))
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                if not dry_run:
+                    move(abs_path, dest_path)
+                    print(f'Moved "{abs_path}" to trash. Keeping "{to_keep}".')
+                else:
+                    print(f'[Dry Run] Would move duplicate "{abs_path}" to trash. Keeping "{to_keep}".')
+        except Exception as e:
+            print(f'Error moving file "{abs_path}" to trash: {e}')
+
+
+@click.command()
+@click.option(
+    "--image-dir",
+    "-i",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    required=True,
+    help="Directory containing images to process.",
+)
+@click.option(
+    "--db-dir",
+    "-d",
+    type=click.Path(file_okay=False, dir_okay=True),
+    required=True,
+    help="Directory to store the database files.",
+)
+@click.option(
+    "--trash-dir",
+    "-t",
+    type=click.Path(file_okay=False, dir_okay=True),
+    default=None,
+    help="Directory to move duplicate images to. If not specified, duplicates will not be moved.",
+    show_default="None",
+)
+@click.option(
+    "--clean-orphans/--no-clean-orphans",
+    default=True,
+    help="Whether to remove orphaned database files that no longer have corresponding images.",
+    show_default=True,
+)
+@click.option("--force-update", "-f", is_flag=True, default=False, help="Force update all images, ignoring modification times.")
+@click.option(
+    "--device",
+    "-c",
+    default="cuda" if torch.cuda.is_available() else "cpu",
+    help="Device to run the CLIP model on.",
+    show_default=True,
+)
+@click.option("--model-id", "-m", default=default_model_id, help="CLIP model identifier.", show_default=True)
+@click.option("--skip-update", is_flag=True, default=False, help="Skip the database update step.")
+@click.option("--dry-run", "-n", is_flag=True, default=False, help="Perform a dry run without making any changes.")
+@click.option(
+    "--cosine-similarity-threshold",
+    "-ct",
+    type=float,
+    default=default_cosine_similarity_threshold,
+    help="Cosine similarity threshold for considering images as duplicates.",
+    show_default=True,
+)
+@click.option(
+    "--euclidean-distance-threshold",
+    "-et",
+    type=float,
+    default=default_euclidean_distance_threshold,
+    help="Euclidean distance threshold for considering images as duplicates.",
+    show_default=True,
+)
+@click.option(
+    "--detection-method",
+    "-dm",
+    type=click.Choice(["cosine", "euclidean"], case_sensitive=False),
+    default="euclidean",
+    help="Method to use for duplicate detection.",
+    show_default=True,
+)
+@click.option(
+    "--keeping-logic",
+    "-kl",
+    type=click.Choice(keeping_modes, case_sensitive=False),
+    default="largest",
+    help="Which copy to keep among duplicates.",
+    show_default=True,
+)
+def main(
+    image_dir: str,
+    db_dir: str,
+    model_id: str,
+    force_update: bool,
+    clean_orphans: bool,
+    device: str,
+    skip_update: bool,
+    dry_run: bool,
+    cosine_similarity_threshold: float,
+    euclidean_distance_threshold: float,
+    detection_method: str,
+    trash_dir: str,
+    keeping_logic: str,
+):
+    if not skip_update and not dry_run:
+        update_db(image_dir, db_dir, force_update, clean_orphans, model_id, device)
+    print("Loading database...")
+    image_paths, database = load_db(db_dir)
+    print(f"Loaded {len(database)} entries in the database.")
+
+    # put all image paths and embeddings into lists for easier processing
+    print("Preparing embeddings...")
+    embeddings_db = np.stack(database, axis=0)  # shape (N, D)
+    print(f"Embeddings shape: {embeddings_db.shape}, memory size: {humanize.naturalsize(embeddings_db.nbytes, binary=True)}")
+
+    print("Finding duplicates...")
+    duplicates = []  # list of [image_path, dupe_image_path, dupe_image_path2, ...]
+    t = tqdm.tqdm(image_paths, desc="Processing images", unit="image")
+
+    def process_duplicate(method, image_path, similar_images, t):
+        # check if this image is already recorded in duplicates (can happen when there's more than 2 duplicates)
+        already_present = False
+        for dup_group in duplicates:
+            if image_path in dup_group:
+                already_present = True
+                break
+        if already_present:
+            return
+        current_dupes = [image_path] + [image_paths[s_idx] for s_idx, _ in similar_images]
+        duplicates.append(current_dupes)
+        similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
+        t.write(f"{method}: {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
+        if trash_dir is not None and not dry_run:
+            move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run)
+
+    # TODO: parallelize this loop
+    for idx, image_path in enumerate(t):
+        image_embedding = embeddings_db[idx]  # shape (D)
+
+        # Only compare this image against images that come after it in the
+        # list to avoid checking each pair twice (i,j) and (j,i).
+        # (upper-triangular comparison)
+        database_slice = embeddings_db[idx + 1 :]
+        if database_slice.size == 0:
+            continue
+
+        similar_images = []
+        if detection_method == "cosine":
+            similar_images = find_similar_images_cosine(idx, image_embedding, database_slice, threshold=cosine_similarity_threshold)
+        elif detection_method == "euclidean":
+            similar_images = find_similar_images_euclidean(
+                idx, image_embedding, database_slice, threshold=euclidean_distance_threshold
+            )
+        if similar_images:
+            # Adjust indices from slice-local [0, ...) back to global indices.
+            similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
+            process_duplicate(detection_method, image_path, similar_images, t)
+
+    if dry_run:
+        print("Dry run complete. No changes were made.")
+        return
+    
+    print(f"Dedupelication complete., processed {len(image_paths)} images, found {len(duplicates)} groups of duplicates.")

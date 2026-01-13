@@ -26,4 +26,4 @@ profile = "black"
 [project.scripts]
 clip-image-encoding-test = "clip_image_deduper.clip_encoding:main"
 clip-image-deduper-db-test = "clip_image_deduper.db_processing:main"
-clip-image-generic-deduper = "clip_image_deduper.generic_deduper:main"
+clip-image-deduper = "clip_image_deduper.main:main"
