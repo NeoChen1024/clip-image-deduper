@@ -9,8 +9,14 @@ import numpy as np
 import torch
 import tqdm
 
-from .clip_encoding import cosine_similarity, default_model_id
+from .clip_encoding import default_model_id
 from .db_processing import load_db, update_db, verify_image, walk_directory_relative
+from .similarity import (
+    default_cosine_similarity_threshold,
+    default_euclidean_distance_threshold,
+    find_similar_images_cosine,
+    find_similar_images_euclidean,
+)
 
 
 @click.command()
@@ -44,6 +50,31 @@ from .db_processing import load_db, update_db, verify_image, walk_directory_rela
 )
 @click.option("--model-id", "-m", default=default_model_id, help="CLIP model identifier.", show_default=True)
 @click.option("--skip-update", is_flag=True, default=False, help="Skip the database update step.")
+@click.option("--dry-run", "-n", is_flag=True, default=False, help="Perform a dry run without making any changes.")
+@click.option(
+    "--cosine-similarity-threshold",
+    "-ct",
+    type=float,
+    default=default_cosine_similarity_threshold,
+    help="Cosine similarity threshold for considering images as duplicates.",
+    show_default=True,
+)
+@click.option(
+    "--euclidean-distance-threshold",
+    "-et",
+    type=float,
+    default=default_euclidean_distance_threshold,
+    help="Euclidean distance threshold for considering images as duplicates.",
+    show_default=True,
+)
+@click.option(
+    "--detection-method",
+    "-dm",
+    type=click.Choice(["cosine", "euclidean"], case_sensitive=False),
+    default="cosine",
+    help="Method to use for duplicate detection.",
+    show_default=True,
+)
 def main(
     image_dir: str,
     db_dir: str,
@@ -52,8 +83,12 @@ def main(
     clean_orphans: bool,
     device: str,
     skip_update: bool,
+    dry_run: bool,
+    cosine_similarity_threshold: float,
+    euclidean_distance_threshold: float,
+    detection_method: str,
 ):
-    if not skip_update:
+    if not skip_update and not dry_run:
         update_db(image_dir, db_dir, force_update, clean_orphans, model_id, device)
     print("Loading database...")
     image_paths, database = load_db(db_dir)
@@ -63,3 +98,28 @@ def main(
     print("Preparing embeddings...")
     embeddings = np.stack(database, axis=0)  # shape (N, D)
     print(f"Embeddings shape: {embeddings.shape}, memory size: {humanize.naturalsize(embeddings.nbytes, binary=True)}")
+
+    print("Finding duplicates...")
+    duplicates = {}
+    t = tqdm.tqdm(image_paths, desc="Processing images", unit="image")
+    
+    def process_duplicate(method, image_path, similar_images):
+        duplicates[image_path] = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
+        similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
+        t.write(f"{method}: {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
+    
+    for idx, image_path in enumerate(t):
+        image_embedding = embeddings[idx]  # shape (D)
+        if detection_method == "cosine":
+            similar_images = find_similar_images_cosine(idx, image_embedding, embeddings, threshold=cosine_similarity_threshold)
+            if similar_images:
+                process_duplicate(detection_method, image_path, similar_images)
+                
+        elif detection_method == "euclidean":
+            similar_images = find_similar_images_euclidean(idx, image_embedding, embeddings, threshold=euclidean_distance_threshold)
+            if similar_images:
+                process_duplicate(detection_method, image_path, similar_images)
+
+    if dry_run:
+        print("Dry run complete. No changes were made.")
+        return

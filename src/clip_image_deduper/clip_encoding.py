@@ -11,6 +11,8 @@ import PIL.Image
 import torch
 import tqdm
 
+from .similarity import cosine_similarity, euclidean_distance
+
 # default model
 default_model_id = "hf-hub:timm/PE-Core-bigG-14-448"
 
@@ -30,12 +32,6 @@ class CLIPImageEncoder:
         with torch.no_grad():
             image_features = self.model.encode_image(image_input)
         return image_features.cpu().squeeze(0).numpy()  # Remove batch dimension and move to CPU
-
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    a_norm = a / np.linalg.norm(a, axis=-1, keepdims=True)
-    b_norm = b / np.linalg.norm(b, axis=-1, keepdims=True)
-    return a_norm @ b_norm.T
 
 
 @click.command()
@@ -63,6 +59,10 @@ def main(model_id: str, device: str, image_paths: List[str]):
         similarity_matrix = cosine_similarity(features_array, features_array)
         print("Cosine Similarity Matrix:")
         print(similarity_matrix)
+
+        distance_matrix = euclidean_distance(features_array, features_array)
+        print("Euclidean Distance Matrix:")
+        print(distance_matrix)
 
 
 if __name__ == "__main__":
