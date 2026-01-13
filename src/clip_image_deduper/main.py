@@ -92,7 +92,7 @@ def pic_dir_keeping_logic(root_dir: str, image_paths: List[str]) -> str:
     return sources[0]
 
 
-def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping_logic: str, dry_run: bool):
+def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping_logic: str, dry_run: bool, t):
     os.makedirs(trash_dir, exist_ok=True)
 
     # Determine which image to keep based on the keeping logic
@@ -120,12 +120,11 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
                 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                 if not dry_run:
                     move(abs_path, dest_path)
-                    print(f'Moved "{abs_path}" to trash. Keeping "{to_keep}".')
+                    t.write(f'Moved "{abs_path}" to trash. Keeping "{to_keep}".')
                 else:
-                    print(f'[Dry Run] Would move duplicate "{abs_path}" to trash. Keeping "{to_keep}".')
+                    t.write(f'[Dry Run] Would move duplicate "{abs_path}" to trash. Keeping "{to_keep}".')
         except Exception as e:
-            print(f'Error moving file "{abs_path}" to trash: {e}')
-
+            t.write(f'Error moving file "{abs_path}" to trash: {e}')
 
 @click.command()
 @click.option(
@@ -243,7 +242,7 @@ def main(
         similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
         t.write(f"{method}: {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
         if trash_dir is not None and not dry_run:
-            move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run)
+            move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run, t)
 
     # TODO: parallelize this loop
     for idx, image_path in enumerate(t):
