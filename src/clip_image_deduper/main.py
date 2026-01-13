@@ -48,7 +48,7 @@ def sort_highest_quality(root_dir: str, image_paths: List[str]) -> List[str]:
 
 # dir structure: Anime, Wallpaper, VWallpaper
 # image sources according to preference (high to low): Pixiv (illust_id_pX.*), Yande.re (yande.re Y_ID *.*)
-#   Danbooru (__*__MD5.*), and Konachan (Konachan.com K_ID *.*), then others (e.g. Twitter/X or misc image sources)
+#   Danbooru (__*__MD5.*), and Konachan (Konachan.com - K_ID *.*), then others (e.g. Twitter/X or misc image sources)
 match_pixiv = re.compile(r"[0-9]+_p[0-9]+\..*")
 match_yande_re = re.compile(r"yande\.re [0-9]+ .*\..*")
 match_danbooru = re.compile(r"__.*__[0-9a-f]{32}\..*")
@@ -58,14 +58,15 @@ match_konachan = re.compile(r"Konachan\.com - [0-9]+ .*\..*")
 def sort_image_sources(image_paths: List[str]) -> List[str]:
     image_path_scores = []  # Tuple[int, str]
     for image_path in image_paths:
+        img_basename = os.path.basename(image_path)
         score = 0
-        if match_pixiv.match(image_path):
+        if match_pixiv.match(img_basename):
             score += 4
-        elif match_yande_re.match(image_path):
+        elif match_yande_re.match(img_basename):
             score += 3
-        elif match_danbooru.match(image_path):
+        elif match_danbooru.match(img_basename):
             score += 2
-        elif match_konachan.match(image_path):
+        elif match_konachan.match(img_basename):
             score += 1
         else:
             score += 0
@@ -114,7 +115,7 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
         abs_path = os.path.join(root_dir, img_path)
         try:
             if img_path != to_keep:
-                dest_path = os.path.join(trash_dir, os.path.basename(img_path))
+                dest_path = os.path.join(trash_dir, img_path)
                 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                 if not dry_run:
                     move(abs_path, dest_path)
@@ -205,7 +206,7 @@ def main(
 ):
     if not skip_update and not dry_run:
         update_db(image_dir, db_dir, force_update, clean_orphans, model_id, device)
-        
+
     print("Loading database...")
     image_paths, database = load_db(db_dir)
     print(f"Loaded {len(database)} entries in the database.")
@@ -233,7 +234,7 @@ def main(
         duplicates.append(current_dupes)
         similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
         t.write(f"{method}: {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
-        if trash_dir is not None and not dry_run:
+        if trash_dir is not None:
             move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run, t)
 
     # TODO: parallelize this loop
@@ -247,9 +248,7 @@ def main(
         if database_slice_torch.size(0) == 0:
             continue
 
-        similar_images = find_similar_images_euclidean(
-            idx, image_embedding, database_slice_torch, threshold=threshold
-        )
+        similar_images = find_similar_images_euclidean(idx, image_embedding, database_slice_torch, threshold=threshold)
         if similar_images:
             # Adjust indices from slice-local [0, ...) back to global indices.
             similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
