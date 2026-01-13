@@ -96,29 +96,49 @@ def main(
 
     # put all image paths and embeddings into lists for easier processing
     print("Preparing embeddings...")
-    embeddings = np.stack(database, axis=0)  # shape (N, D)
-    print(f"Embeddings shape: {embeddings.shape}, memory size: {humanize.naturalsize(embeddings.nbytes, binary=True)}")
+    embeddings_db = np.stack(database, axis=0)  # shape (N, D)
+    print(f"Embeddings shape: {embeddings_db.shape}, memory size: {humanize.naturalsize(embeddings_db.nbytes, binary=True)}")
 
     print("Finding duplicates...")
-    duplicates = {}
+    duplicates = []  # list of [image_path, dupe_image_path, dupe_image_path2, ...]
     t = tqdm.tqdm(image_paths, desc="Processing images", unit="image")
-    
-    def process_duplicate(method, image_path, similar_images):
-        duplicates[image_path] = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
+
+    def process_duplicate(method, image_path, similar_images, t):
+        # check if this image is already recorded in duplicates (can happen when there's more than 2 duplicates)
+        already_present = False
+        for dup_group in duplicates:
+            if image_path in dup_group:
+                already_present = True
+                break
+        if already_present:
+            return
+
+        duplicates.append([image_path] + [image_paths[s_idx] for s_idx, _ in similar_images])
         similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
         t.write(f"{method}: {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
-    
+
+    # TODO: parallelize this loop
     for idx, image_path in enumerate(t):
-        image_embedding = embeddings[idx]  # shape (D)
+        image_embedding = embeddings_db[idx]  # shape (D)
+
+        # Only compare this image against images that come after it in the
+        # list to avoid checking each pair twice (i,j) and (j,i).
+        # (upper-triangular comparison)
+        database_slice = embeddings_db[idx + 1 :]
+        if database_slice.size == 0:
+            continue
+
+        similar_images = []
         if detection_method == "cosine":
-            similar_images = find_similar_images_cosine(idx, image_embedding, embeddings, threshold=cosine_similarity_threshold)
-            if similar_images:
-                process_duplicate(detection_method, image_path, similar_images)
-                
+            similar_images = find_similar_images_cosine(idx, image_embedding, database_slice, threshold=cosine_similarity_threshold)
         elif detection_method == "euclidean":
-            similar_images = find_similar_images_euclidean(idx, image_embedding, embeddings, threshold=euclidean_distance_threshold)
-            if similar_images:
-                process_duplicate(detection_method, image_path, similar_images)
+            similar_images = find_similar_images_euclidean(
+                idx, image_embedding, database_slice, threshold=euclidean_distance_threshold
+            )
+        if similar_images:
+            # Adjust indices from slice-local [0, ...) back to global indices.
+            similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
+            process_duplicate(detection_method, image_path, similar_images, t)
 
     if dry_run:
         print("Dry run complete. No changes were made.")
