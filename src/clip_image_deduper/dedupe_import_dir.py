@@ -158,7 +158,7 @@ def main(
         if similar_images:
             similar_images_paths = [(base_image_paths[s_idx], sim) for s_idx, sim in similar_images]
             t.write(f"Found {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
-            duplicate_count += 1
+            duplicate_count += len(similar_images)
             if trash_dir is not None:
                 move_duplicate(image_path, import_image_dir, trash_dir, dry_run, t)
 
