@@ -17,3 +17,13 @@ is added to the original image filename, e.g. `image.jpg` -> `image.jpg.npy`)
 * [X] Support cleaning up db entries when image files are deleted.
 * [X] Implement deduplication logic.
 * [ ] Async batched embedding computation for better performance.
+
+# Current Performance:
+
+Test platform:
+
+Python 3.12 on Arch Linux, AMD Ryzen 7 5700X3D + NVIDIA RTX4080
+
+Image encoding: about 4~5it/s
+
+Dedupe: main.py: ~900image/s for 60k images dataset
