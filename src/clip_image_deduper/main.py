@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import gc
 from shutil import move
 from typing import List, Optional
 
@@ -76,9 +77,14 @@ def sort_image_sources(image_paths: List[str]) -> List[str]:
     return [p[1] for p in image_paths_sorted]
 
 
+def is_wallpaper_dir(image_path: str) -> bool:
+    dir_name = os.path.dirname(image_path)
+    return "Wallpaper" in dir_name or "VWallpaper" in dir_name
+
+
 def pic_dir_keeping_logic(root_dir: str, image_paths: List[str]) -> str:
     # First, prefer to keep images in Wallpaper and VWallpaper:
-    wallpaper_images = [p for p in image_paths if "Wallpaper" in os.path.dirname(p)]  # image_path is relative path
+    wallpaper_images = [p for p in image_paths if is_wallpaper_dir(p)]  # image_path is relative path
     if len(wallpaper_images) > 0:
         # there's same images in wallpapers and Anime dir, keep the copies in wallpaper.
         sources = sort_image_sources(wallpaper_images)
@@ -175,14 +181,6 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
     show_default=True,
 )
 @click.option(
-    "--detection-method",
-    "-dm",
-    type=click.Choice(["cosine", "euclidean"], case_sensitive=False),
-    default="euclidean",
-    help="Method to use for duplicate detection.",
-    show_default=True,
-)
-@click.option(
     "--keeping-logic",
     "-kl",
     type=click.Choice(keeping_modes, case_sensitive=False),
@@ -200,44 +198,32 @@ def main(
     skip_update: bool,
     dry_run: bool,
     threshold: float,
-    detection_method: str,
     trash_dir: str,
     keeping_logic: str,
 ):
+    torch.set_float32_matmul_precision("highest")  # use highest precision for best accuracy in distance calculations
     if not skip_update and not dry_run:
         update_db(image_dir, db_dir, force_update, clean_orphans, model_id, device)
 
     print("Loading database...")
     image_paths, database = load_db(db_dir)
     print(f"Loaded {len(database)} entries in the database.")
+    if len(database) == 0:
+        print("No entries found in the database. Exiting.")
+        raise SystemExit(1)
 
     # put all image paths and embeddings into lists for easier processing
     print("Preparing embeddings...")
     embeddings_db = np.stack(database, axis=0)  # (N, D)
+    del database
+    gc.collect()
     print(f"Embeddings shape: {embeddings_db.shape}, memory size: {humanize.naturalsize(embeddings_db.nbytes, binary=True)}")
     embeddings_torch = torch.from_numpy(embeddings_db).to(device).float()
 
     print("Finding duplicates...")
-    duplicates = []  # list of [image_path, dupe_image_path, dupe_image_path2, ...]
+    duplicates = {}  # dict: {"image_path": bool} to mark images already recorded as duplicates
     t = tqdm.tqdm(image_paths, desc="Processing images", unit="image")
 
-    def process_duplicate(method, image_path, similar_images, t):
-        # check if this image is already recorded in duplicates (can happen when there's more than 2 duplicates)
-        already_present = False
-        for dup_group in duplicates:
-            if image_path in dup_group:
-                already_present = True
-                break
-        if already_present:
-            return
-        current_dupes = [image_path] + [image_paths[s_idx] for s_idx, _ in similar_images]
-        duplicates.append(current_dupes)
-        similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
-        t.write(f"{method}: {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
-        if trash_dir is not None:
-            move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run, t)
-
-    # TODO: parallelize this loop
     for idx, image_path in enumerate(t):
         image_embedding = embeddings_db[idx]  # shape (D)
 
@@ -252,10 +238,19 @@ def main(
         if similar_images:
             # Adjust indices from slice-local [0, ...) back to global indices.
             similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
-            process_duplicate(detection_method, image_path, similar_images, t)
+            # check if this image is already recorded in duplicates (can happen when there's more than 2 duplicates)
+            if image_path in duplicates:
+                return
+            current_dupes = [image_path] + [image_paths[s_idx] for s_idx, _ in similar_images]
+            for img_path in current_dupes:
+                duplicates[img_path] = True
+            similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
+            t.write(f"Found {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
+            if trash_dir is not None:
+                move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run, t)
 
+    dry_run_str = ""
     if dry_run:
-        print("Dry run complete. No changes were made.")
-        return
+        dry_run_str = " (dry run, no files were moved)"
 
-    print(f"Dedupelication complete., processed {len(image_paths)} images, found {len(duplicates)} groups of duplicates.")
+    print(f"Dedupelication complete{dry_run_str}, processed {len(image_paths)} images, found {len(duplicates)} duplicates.")
