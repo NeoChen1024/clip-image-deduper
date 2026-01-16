@@ -7,9 +7,10 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 
-default_euclidean_distance_threshold = 0.5
+default_euclidean_distance_threshold = 0.1  # same images will have distance 0.0 to 0.05 depending on encoding model
 
 
+# slow generic numpy version, for testing and reference
 def euclidean_distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Compute the Euclidean distance matrix between two sets of vectors.
 
@@ -21,29 +22,36 @@ def euclidean_distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     diff = a[:, np.newaxis, :] - b[np.newaxis, :, :]
     return np.linalg.norm(diff, axis=-1)
 
+
 @torch.no_grad()
+@torch.compile()
 def euclidean_distance_torch_1_to_many(
-    a: np.ndarray,
-    b_torch: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
 ) -> np.ndarray:
     """
-    a: (D,) or (1, D) numpy
-    b_torch: (N, D) torch tensor already on correct device
+    a: (1, D) torch tensor
+    b: (N, D) torch tensor already on correct device
     returns: (N,) numpy distances
     """
-    a_t = torch.from_numpy(a).to(b_torch.device).float()
-    if a_t.ndim == 1:
-        a_t = a_t.unsqueeze(0)  # (1, D)
-
     # torch.cdist computes pairwise distances; result shape (1, N)
-    d = torch.cdist(a_t, b_torch, p=2)
+    d = torch.cdist(a, b, p=2)
     return d[0].cpu().numpy()
 
 
+@torch.compile()
 def find_similar_images_euclidean(
-    image_idx: int, image_embedding: np.ndarray, database: torch.Tensor, threshold: float = default_euclidean_distance_threshold
+    image_idx: int, image_embedding_1d: np.ndarray, database: torch.Tensor, threshold: float = default_euclidean_distance_threshold
 ) -> List[Tuple[int, float]]:
-    """Find similar images in the database based on Euclidean distance."""
+    """Find similar images in the database based on Euclidean distance.
+
+    image_idx: index of the query image in the database, -1 if not in database
+    image_embedding_1d: (D,) numpy array of the query image embedding
+    database: (N, D) torch tensor of the database embeddings
+    threshold: distance threshold for considering images as similar
+    """
+    image_embedding_unsqueezed = image_embedding_1d[np.newaxis, :]  # shape (1, D)
+    image_embedding = torch.from_numpy(image_embedding_unsqueezed).to(database.device).float()
     distances = euclidean_distance_torch_1_to_many(image_embedding, database)
 
     # For a single query vector vs database, distances has shape (1, N).
@@ -52,5 +60,8 @@ def find_similar_images_euclidean(
         distances = distances[0]
 
     matches = np.where(distances <= threshold)[0]
-    similar_images = [(int(idx), float(distances[idx])) for idx in matches if idx != image_idx]
+    if image_idx >= 0:
+        similar_images = [(int(idx), float(distances[idx])) for idx in matches if idx != image_idx]
+    else:
+        similar_images = [(int(idx), float(distances[idx])) for idx in matches]
     return similar_images
