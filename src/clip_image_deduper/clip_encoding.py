@@ -28,7 +28,7 @@ class CLIPImageEncoder:
 
     # unload model from memory when done
     def __del__(self):
-        self.model.to("cpu") # move to cpu before deleting
+        self.model.to("cpu")  # move to cpu before deleting
         del self.model
         torch.cuda.empty_cache()
 
@@ -38,6 +38,13 @@ class CLIPImageEncoder:
         with torch.no_grad():
             image_features = self.model.encode_image(image_input)
         return image_features.cpu().squeeze(0).numpy()  # Remove batch dimension and move to CPU
+
+    def encode_images(self, images: List[PIL.Image.Image]) -> np.ndarray:
+        """Encode a list of images using the CLIP model."""
+        image_inputs = torch.stack([self.preprocess(img) for img in images]).to(self.device)  # bottleneck here
+        with torch.no_grad():
+            image_features = self.model.encode_image(image_inputs)
+        return image_features.cpu().numpy()
 
 
 @click.command()
