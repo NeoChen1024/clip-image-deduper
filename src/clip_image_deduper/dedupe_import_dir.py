@@ -15,10 +15,8 @@ import numpy as np
 import torch
 import tqdm
 
-import PIL.Image
-
-from .clip_encoding import default_model_id
-from .db_processing import load_db, update_db
+from .clip_encoding import CLIPImageEncoder, default_model_id
+from .db_processing import load_database, update_database
 from .similarity import (
     default_euclidean_distance_threshold,
     find_similar_images_euclidean,
@@ -118,15 +116,16 @@ def main(
     trash_dir: str,
 ):
     if not skip_update and not dry_run:
+        encoder = CLIPImageEncoder(model_id=model_id, device=device)
         print("Updating base database...")
-        update_db(base_image_dir, base_db_dir, force_update, clean_orphans, model_id, device)
+        update_database(encoder, base_image_dir, base_db_dir, force_update, clean_orphans)
         print("Updating import database...")
-        update_db(import_image_dir, import_db_dir, force_update, clean_orphans, model_id, device)
+        update_database(encoder, import_image_dir, import_db_dir, force_update, clean_orphans)
         gc.collect()
 
     def db_processing(db_type: str, db_dir: str) -> Tuple[List[str], np.ndarray, torch.Tensor]:
         print(f"Loading {db_type} database...")
-        image_paths, database = load_db(db_dir)
+        image_paths, database = load_database(db_dir)
         print(f"Loaded {len(database)} entries in the database.")
         if len(database) == 0:
             print(f"No entries found in the {db_type} database. Exiting.")

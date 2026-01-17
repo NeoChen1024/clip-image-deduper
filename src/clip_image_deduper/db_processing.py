@@ -4,10 +4,10 @@
 # This module is for updating the "database" of clip_image_deduper. It scans a specified directory for valid images,
 # If an image's modification time is same or newer than the existing .npz file, it calls a provided function to process the image.
 
-import json
 import math
 import os
-from typing import Any, Callable, Dict, List, Tuple
+import multiprocessing as mp
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import click
 import numpy as np
@@ -38,11 +38,10 @@ def verify_image(image_path: str) -> bool:
         return False
 
 
-def update_database_generic(
+def update_database(
+    encoder: CLIPImageEncoder,
     image_dir: str,
     db_dir: str,
-    process_image_func: Callable,
-    data_extension: str,
     force_update: bool = False,
     clean_orphans: bool = True,
 ):
@@ -51,7 +50,7 @@ def update_database_generic(
     for relative_path in t:
         try:
             image_path = os.path.join(image_dir, relative_path)
-            data_path = os.path.join(db_dir, f"{relative_path}{data_extension}")
+            data_path = os.path.join(db_dir, f"{relative_path}.npz")
 
             image_mtime = os.path.getmtime(image_path)
             if os.path.exists(data_path) and not force_update:
@@ -69,7 +68,12 @@ def update_database_generic(
                 continue
 
             t.write(f"Processing image: {image_path}")
-            process_image_func(image_path, data_path)
+            with PIL.Image.open(image_path) as img:
+                img = img.convert("RGB")
+                encoding = encoder.encode_image(img)
+
+            # save embedding as NumPy npz file
+            np.savez_compressed(data_path, clip_embedding=encoding)
         except Exception as e:
             t.write(f"Error processing image {relative_path}: {e}")
 
@@ -80,7 +84,7 @@ def update_database_generic(
         for relative_path in t:
             try:
                 data_path = os.path.join(db_dir, relative_path)
-                image_path = os.path.join(image_dir, relative_path[: -len(data_extension)])
+                image_path = os.path.join(image_dir, relative_path.removesuffix(".npz"))  # remove .npz extension
 
                 if not os.path.exists(image_path):
                     t.write(f"Removing orphaned data file: {data_path}")
@@ -89,48 +93,55 @@ def update_database_generic(
                 t.write(f"Error checking data file {relative_path}: {e}")
 
 
-def load_database_generic(db_dir: str, data_extension: str, load_data_func: Callable) -> Tuple[List[str], List[Any]]:
+def _load_single_db_file(args: Tuple[str, str]) -> Optional[Union[Tuple[str, ndarray], Tuple[str, str]]]:
+    """Helper function to load a single database file.
+
+    This is defined at module level so it can be used with multiprocessing.Pool.
+    """
+    db_dir, relative_path = args
+
+    if not relative_path.endswith(".npz"):
+        return None
+
+    db_file_path = os.path.join(db_dir, relative_path)
+    try:
+        data = np.load(db_file_path)
+        return relative_path.removesuffix(".npz"), data["clip_embedding"]
+    except Exception as e:
+        # Return an error marker and message so the caller can log it.
+        return "", f"Error loading database file {db_file_path}: {e}"
+
+
+def load_database(db_dir: str) -> Tuple[List[str], List[np.ndarray]]:
     """Load all database files from the db directory."""
-    file_paths = []
-    db_data = []
-    t = tqdm.tqdm(list(walk_directory_relative(db_dir)))
-    for relative_path in t:
-        if relative_path.endswith(data_extension):
-            db_file_path = os.path.join(db_dir, relative_path)
-            try:
-                data = load_data_func(db_file_path)
-                file_paths.append(relative_path.removesuffix(data_extension))
+    file_paths: List[str] = []
+    db_data: List[np.ndarray] = []
+
+    file_list = list(walk_directory_relative(db_dir))
+    npz_files = [p for p in file_list if p.endswith(".npz")]
+
+    if not npz_files:
+        return file_paths, db_data
+
+    t = tqdm.tqdm(total=len(npz_files))
+
+    # Use a process pool to load database files in parallel.
+    with mp.Pool() as pool:
+        for result in pool.imap_unordered(_load_single_db_file, ((db_dir, p) for p in npz_files)):
+            if result is None:
+                # Non-npz files are filtered out in the worker, but keep for safety.
+                continue
+
+            rel_path, data = result
+            if type(data) is str:
+                # Log errors via tqdm to keep output consistent with the rest of the module.
+                t.write(data)
+            elif isinstance(data, np.ndarray):
+                file_paths.append(rel_path)
                 db_data.append(data)
-            except Exception as e:
-                t.write(f"Error loading database file {db_file_path}: {e}")
+
+            t.update(1)
     return file_paths, db_data
-
-
-def update_db(image_dir: str, db_dir: str, force_update: bool, clean_orphans: bool, clip_model: str, device: str):
-    print(f"Using CLIP model: {clip_model}, on device {device}")
-    encoder = CLIPImageEncoder(model_id=clip_model, device=device)
-
-    # don't need to catch exceptions here, they are handled in update_database_generic
-    def process_image(image_path: str, db_npz_path: str):
-        with PIL.Image.open(image_path) as img:
-            img = img.convert("RGB")
-            encoding = encoder.encode_image(img)
-
-        # save embedding as NumPy npz file
-        np.savez_compressed(db_npz_path, clip_embedding=encoding)
-
-    update_database_generic(
-        image_dir, db_dir, process_image, data_extension=".npz", force_update=force_update, clean_orphans=clean_orphans
-    )
-
-
-def load_db(db_dir: str) -> Tuple[List[str], List[ndarray]]:
-    def load_npz(f) -> ndarray:
-        data = np.load(f)
-        return data["clip_embedding"]
-
-    filenames, database = load_database_generic(db_dir, data_extension=".npz", load_data_func=load_npz)
-    return filenames, database  # could be huge
 
 
 @click.command()
@@ -146,7 +157,7 @@ def load_db(db_dir: str) -> Tuple[List[str], List[ndarray]]:
     "-d",
     type=click.Path(file_okay=False, dir_okay=True),
     required=True,
-    help="Directory to store the database JSON files.",
+    help="Directory to store the database files.",
 )
 @click.option(
     "--clean-orphans/--no-clean-orphans",
@@ -163,11 +174,20 @@ def load_db(db_dir: str) -> Tuple[List[str], List[ndarray]]:
     help="Device to run the CLIP model on.",
     show_default=True,
 )
-def main(image_dir: str, db_dir: str, force_update: bool, clean_orphans: bool, clip_model: str, device: str):
-    print("Starting database update...")
-    update_db(image_dir, db_dir, force_update, clean_orphans, clip_model, device)
+@click.option(
+    "--skip-update",
+    is_flag=True,
+    default=False,
+    help="Skip updating the database and only load existing data.",
+)
+def main(image_dir: str, db_dir: str, force_update: bool, clean_orphans: bool, clip_model: str, device: str, skip_update: bool):
+    if not skip_update:
+        print("Starting database update...")
+        print(f"Using CLIP model: {clip_model} on device: {device}")
+        encoder = CLIPImageEncoder(model_id=clip_model, device=device)
+        update_database(encoder, image_dir, db_dir, force_update, clean_orphans)
     print("Try loading the database...")
-    fn, db = load_db(db_dir)
+    fn, db = load_database(db_dir)
     print(f"Loaded {len(db)} entries in the database.")
 
 

@@ -10,6 +10,7 @@ import open_clip
 import PIL.Image
 import torch
 import tqdm
+from typing import Optional
 
 from .similarity import euclidean_distance
 
@@ -20,10 +21,11 @@ default_model_id = "hf-hub:timm/PE-Core-bigG-14-448"
 class CLIPImageEncoder:
     """Class to handle CLIP model and preprocessing."""
 
-    def __init__(self, model_id: str = default_model_id, device: str = "cpu"):
+    def __init__(self, model_id: str = default_model_id, device: str = "cpu", dtype: str = "float32"):
         self.model_id = model_id
         self.device = device
-        self.model, _, self.preprocess = open_clip.create_model_and_transforms(model_id, device=device, jit=True, precision="fp32")
+        print(f"Using CLIP model: {model_id} on device: {device}, dtype: {dtype}")
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(model_id, device=device, jit=True, precision=dtype)
         self.tokenizer = open_clip.get_tokenizer(model_id)
 
     # unload model from memory when done
@@ -32,46 +34,58 @@ class CLIPImageEncoder:
         del self.model
         torch.cuda.empty_cache()
 
+    @torch.no_grad()
+    @torch.compile()
     def encode_image(self, image: PIL.Image.Image) -> np.ndarray:
         """Encode an image using the CLIP model."""
         image_input = self.preprocess(image).unsqueeze(0).to(self.device)  # Add batch dimension and move to device
-        with torch.no_grad():
-            image_features = self.model.encode_image(image_input)
-        return image_features.cpu().squeeze(0).numpy()  # Remove batch dimension and move to CPU
+        image_features = self.model.encode_image(image_input)
+        return image_features.cpu().squeeze(0).float().numpy()  # Remove batch dimension and move to CPU
 
+    @torch.no_grad()
+    @torch.compile()
     def encode_images(self, images: List[PIL.Image.Image]) -> np.ndarray:
         """Encode a list of images using the CLIP model."""
         image_inputs = torch.stack([self.preprocess(img) for img in images]).to(self.device)  # bottleneck here
-        with torch.no_grad():
-            image_features = self.model.encode_image(image_inputs)
-        return image_features.cpu().numpy()
+        image_features = self.model.encode_image(image_inputs)
+        return image_features.cpu().float().numpy()
 
 
 @click.command()
 @click.option("--model-id", "-m", default=default_model_id, help="CLIP model identifier.", show_default=True)
 @click.option("--device", "-d", default="cpu", help="Device to run the model on.", show_default=True)
+@click.option(
+    "--dtype",
+    "-p",
+    type=click.Choice(["float32", "float16", "bfloat16"], case_sensitive=False),
+    default="float32",
+    help="Data type for model precision. Default is float16 for CUDA and float32 otherwise.",
+    show_default=True,
+)
 @click.argument("image_paths", nargs=-1, type=click.Path(exists=True, dir_okay=False))
-def main(model_id: str, device: str, image_paths: List[str]):
+def main(model_id: str, device: str, dtype: str, image_paths: List[str]):
     """CLI to encode images using CLIP model."""
-    encoder = CLIPImageEncoder(model_id=model_id, device=device)
+    encoder = CLIPImageEncoder(model_id=model_id, device=device, dtype=dtype)
     print(f"Loaded model: {model_id} on device: {device}")
-    t = tqdm.tqdm(image_paths)
-    features_list = []
-    for image_path in t:
+    features = np.ndarray([])
+    images_pil = []
+    for image_path in image_paths:
         try:
             image = PIL.Image.open(image_path).convert("RGB")
-            features = encoder.encode_image(image)
-            features_list.append(features)
-            t.write(f"Encoded features for image #{t.n} {image_path}: {features}")
+            images_pil.append(image)
         except Exception as e:
-            t.write(f"Error processing image #{t.n} {image_path}: {e}")
+            print(f"Error processing image {image_path}: {e}")
+            
+    if images_pil:
+        features = encoder.encode_images(images_pil)
+        for img_path, feat in zip(image_paths, features):
+            print(f"Image: {img_path}, Feature shape: {feat.shape}")
 
     # show similarity matrix
-    if len(features_list) >= 2:
-        features_array = np.stack(features_list, axis=0)
-        distance_matrix = euclidean_distance(features_array, features_array)
-        print("Euclidean Distance Matrix:")
-        print(distance_matrix)
+    print("Feature matrix shape:", features.shape)
+    distance_matrix = euclidean_distance(features, features)
+    print("Euclidean Distance Matrix:")
+    print(distance_matrix)
 
 
 if __name__ == "__main__":

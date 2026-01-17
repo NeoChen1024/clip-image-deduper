@@ -15,8 +15,8 @@ import re
 
 import PIL.Image
 
-from .clip_encoding import default_model_id
-from .db_processing import load_db, update_db
+from .clip_encoding import CLIPImageEncoder, default_model_id
+from .db_processing import load_database, update_database
 from .similarity import (
     default_euclidean_distance_threshold,
     find_similar_images_euclidean,
@@ -203,10 +203,12 @@ def main(
 ):
     torch.set_float32_matmul_precision("highest")  # use highest precision for best accuracy in distance calculations
     if not skip_update and not dry_run:
-        update_db(image_dir, db_dir, force_update, clean_orphans, model_id, device)
+        print("Updating database...")
+        encoder = CLIPImageEncoder(model_id=model_id, device=device)
+        update_database(encoder, image_dir, db_dir, force_update, clean_orphans)
 
     print("Loading database...")
-    image_paths, database = load_db(db_dir)
+    image_paths, database = load_database(db_dir)
     print(f"Loaded {len(database)} entries in the database.")
     if len(database) == 0:
         print("No entries found in the database. Exiting.")
