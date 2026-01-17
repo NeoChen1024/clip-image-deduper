@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
 import gc
+import os
+import re
 from shutil import move
 from typing import List, Optional
 
 import click
 import humanize
 import numpy as np
+import PIL.Image
 import torch
 import tqdm
-import re
-
-import PIL.Image
 
 from .clip_encoding import CLIPImageEncoder, default_model_id
 from .db_processing import load_database, update_database
@@ -169,6 +168,14 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
     help="Device to run the CLIP model on.",
     show_default=True,
 )
+@click.option(
+    "--batch-size",
+    "-b",
+    type=int,
+    default=4,
+    help="Batch size for processing images when updating the database.",
+    show_default=True,
+)
 @click.option("--model-id", "-m", default=default_model_id, help="CLIP model identifier.", show_default=True)
 @click.option("--skip-update", is_flag=True, default=False, help="Skip the database update step.")
 @click.option("--dry-run", "-n", is_flag=True, default=False, help="Perform a dry run without making any changes.")
@@ -200,12 +207,13 @@ def main(
     threshold: float,
     trash_dir: str,
     keeping_logic: str,
+    batch_size: int = 4,
 ):
     torch.set_float32_matmul_precision("highest")  # use highest precision for best accuracy in distance calculations
     if not skip_update and not dry_run:
         print("Updating database...")
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
-        update_database(encoder, image_dir, db_dir, force_update, clean_orphans)
+        update_database(encoder, image_dir, db_dir, force_update, clean_orphans, batch_size=batch_size)
 
     print("Loading database...")
     image_paths, database = load_database(db_dir)

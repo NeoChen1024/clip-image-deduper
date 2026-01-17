@@ -2,15 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """open_clip model and preprocessing setup for clip_image_deduper."""
-from typing import List
+from typing import List, Optional
 
 import click
 import numpy as np
 import open_clip
 import PIL.Image
 import torch
-import tqdm
-from typing import Optional
 
 from .similarity import euclidean_distance
 
@@ -21,9 +19,23 @@ default_model_id = "hf-hub:timm/PE-Core-bigG-14-448"
 class CLIPImageEncoder:
     """Class to handle CLIP model and preprocessing."""
 
-    def __init__(self, model_id: str = default_model_id, device: str = "cpu", dtype: str = "float32"):
+    def __init__(self, model_id: str = default_model_id, device: str = "cpu", dtype: Optional[str] = None):
         self.model_id = model_id
         self.device = device
+        if dtype is None:
+            if "cuda" in device:
+                dtype = "fp16"
+            else:
+                dtype = "fp32"
+        # Open CLIP uses "fp32", "fp16" as dtype strings
+        elif dtype == "float32":
+            dtype = "fp32"
+        elif dtype == "float16":
+            dtype = "fp16"
+        tdtype = torch.float32
+        if dtype == "fp16":
+            tdtype = torch.float16
+        self.tdtype = tdtype
         print(f"Using CLIP model: {model_id} on device: {device}, dtype: {dtype}")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(model_id, device=device, jit=True, precision=dtype)
         self.tokenizer = open_clip.get_tokenizer(model_id)
@@ -36,17 +48,10 @@ class CLIPImageEncoder:
 
     @torch.no_grad()
     @torch.compile()
-    def encode_image(self, image: PIL.Image.Image) -> np.ndarray:
-        """Encode an image using the CLIP model."""
-        image_input = self.preprocess(image).unsqueeze(0).to(self.device)  # Add batch dimension and move to device
-        image_features = self.model.encode_image(image_input)
-        return image_features.cpu().squeeze(0).float().numpy()  # Remove batch dimension and move to CPU
-
-    @torch.no_grad()
-    @torch.compile()
     def encode_images(self, images: List[PIL.Image.Image]) -> np.ndarray:
         """Encode a list of images using the CLIP model."""
-        image_inputs = torch.stack([self.preprocess(img) for img in images]).to(self.device)  # bottleneck here
+        # TODO: performance can be improved by doing preprocessing asynchronously in parallel
+        image_inputs = torch.stack([self.preprocess(img) for img in images]).to(self.tdtype).to(self.device)  # bottleneck here
         image_features = self.model.encode_image(image_inputs)
         return image_features.cpu().float().numpy()
 
@@ -75,7 +80,7 @@ def main(model_id: str, device: str, dtype: str, image_paths: List[str]):
             images_pil.append(image)
         except Exception as e:
             print(f"Error processing image {image_path}: {e}")
-            
+
     if images_pil:
         features = encoder.encode_images(images_pil)
         for img_path, feat in zip(image_paths, features):

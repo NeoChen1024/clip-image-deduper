@@ -5,8 +5,9 @@
 # If an image's modification time is same or newer than the existing .npz file, it calls a provided function to process the image.
 
 import math
-import os
 import multiprocessing as mp
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import click
@@ -38,16 +39,57 @@ def verify_image(image_path: str) -> bool:
         return False
 
 
+def _load_and_prepare_image(image_dir: str, relative_path: str) -> Tuple[str, Union[PIL.Image.Image, Exception]]:
+    """Load and validate a single image, returning either a PIL image or an Exception.
+
+    This is intended to be used with ThreadPoolExecutor for asynchronous IO.
+    """
+    image_path = os.path.join(image_dir, relative_path)
+
+    try:
+        # Reuse existing validation logic.
+        if not verify_image(image_path):
+            raise ValueError("Invalid image")
+
+        # Load and convert to RGB; ensure data is fully loaded into memory.
+        with PIL.Image.open(image_path) as img:
+            img = img.convert("RGB")
+            img.load()
+
+        return relative_path, img
+    except Exception as e:
+        return relative_path, e
+
+
+def _encode_and_save_batch(
+    encoder: CLIPImageEncoder,
+    db_dir: str,
+    batch_paths: List[str],
+    batch_images: List[PIL.Image.Image],
+) -> None:
+    """Encode a batch of images and save their embeddings to disk."""
+    if not batch_images:
+        return
+
+    embeddings = encoder.encode_images(batch_images)
+    for rel_path, embedding in zip(batch_paths, embeddings):
+        data_path = os.path.join(db_dir, f"{rel_path}.npz")
+        os.makedirs(os.path.dirname(data_path), exist_ok=True)
+        np.savez_compressed(data_path, clip_embedding=embedding)
+
+
 def update_database(
     encoder: CLIPImageEncoder,
     image_dir: str,
     db_dir: str,
     force_update: bool = False,
     clean_orphans: bool = True,
+    batch_size: int = 4,
 ):
     """Update the database of images by processing each image in the specified directory."""
-    t = tqdm.tqdm(list(walk_directory_relative(image_dir)))
-    for relative_path in t:
+    # First determine which images actually need to be (re)encoded based on mtime.
+    candidates: List[str] = []
+    for relative_path in walk_directory_relative(image_dir):
         try:
             image_path = os.path.join(image_dir, relative_path)
             data_path = os.path.join(db_dir, f"{relative_path}.npz")
@@ -57,25 +99,52 @@ def update_database(
                 db_mtime = os.path.getmtime(data_path)
             else:
                 db_mtime = -math.inf
-                # try to create parent directories
-                os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
             if image_mtime < db_mtime:
                 continue
 
-            if not verify_image(image_path):
-                t.write(f"Skipping invalid image: {image_path}")
-                continue
+            candidates.append(relative_path)
+        except Exception:
+            # Ignore pathological filesystem issues here; they will be surfaced later if needed.
+            continue
 
-            t.write(f"Processing image: {image_path}")
-            with PIL.Image.open(image_path) as img:
-                img = img.convert("RGB")
-                encoding = encoder.encode_image(img)
+    # Asynchronously load and validate candidate images, then encode them in batches.
+    if candidates:
+        t = tqdm.tqdm(total=len(candidates))
+        batch_paths: List[str] = []
+        batch_images: List[PIL.Image.Image] = []
 
-            # save embedding as NumPy npz file
-            np.savez_compressed(data_path, clip_embedding=encoding)
-        except Exception as e:
-            t.write(f"Error processing image {relative_path}: {e}")
+        # Limit the maximum number of in-flight futures to a small
+        # multiple of the encoding batch size to avoid holding an
+        # unbounded number of Future objects in memory.
+        max_in_flight_futures = max(batch_size * 2, 1)
+
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            num_candidates = len(candidates)
+            for start in range(0, num_candidates, max_in_flight_futures):
+                chunk = candidates[start : start + max_in_flight_futures]
+                futures = [executor.submit(_load_and_prepare_image, image_dir, p) for p in chunk]
+
+                for future in as_completed(futures):
+                    rel_path, result = future.result()
+
+                    if isinstance(result, Exception):
+                        image_path = os.path.join(image_dir, rel_path)
+                        t.write(f"Skipping invalid image: {image_path} ({result})")
+                    else:
+                        batch_paths.append(rel_path)
+                        batch_images.append(result)
+
+                        if len(batch_images) >= batch_size:
+                            _encode_and_save_batch(encoder, db_dir, batch_paths, batch_images)
+                            batch_paths = []
+                            batch_images = []
+
+                    t.update(1)
+
+        # Flush any remaining images.
+        if batch_images:
+            _encode_and_save_batch(encoder, db_dir, batch_paths, batch_images)
 
     if clean_orphans:
         # walk through db_dir to find and remove orphaned data files
@@ -175,17 +244,33 @@ def load_database(db_dir: str) -> Tuple[List[str], List[np.ndarray]]:
     show_default=True,
 )
 @click.option(
+    "--batch-size",
+    "-b",
+    type=int,
+    default=4,
+    help="Batch size for processing images when updating the database.",
+    show_default=True,
+)
+@click.option(
     "--skip-update",
     is_flag=True,
     default=False,
     help="Skip updating the database and only load existing data.",
 )
-def main(image_dir: str, db_dir: str, force_update: bool, clean_orphans: bool, clip_model: str, device: str, skip_update: bool):
+def main(
+    image_dir: str,
+    db_dir: str,
+    force_update: bool,
+    clean_orphans: bool,
+    clip_model: str,
+    device: str,
+    skip_update: bool,
+    batch_size: int,
+):
     if not skip_update:
         print("Starting database update...")
-        print(f"Using CLIP model: {clip_model} on device: {device}")
         encoder = CLIPImageEncoder(model_id=clip_model, device=device)
-        update_database(encoder, image_dir, db_dir, force_update, clean_orphans)
+        update_database(encoder, image_dir, db_dir, force_update, clean_orphans, batch_size=batch_size)
     print("Try loading the database...")
     fn, db = load_database(db_dir)
     print(f"Loaded {len(db)} entries in the database.")

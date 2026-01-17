@@ -16,7 +16,7 @@ is added to the original image filename, e.g. `image.jpg` -> `image.jpg.npy`)
 * [X] Support updating embedding when image files are changed.
 * [X] Support cleaning up db entries when image files are deleted.
 * [X] Implement deduplication logic.
-* [ ] Async batched embedding computation for better performance.
+* [X] Async batched embedding computation for better performance.
 
 # Current Performance:
 

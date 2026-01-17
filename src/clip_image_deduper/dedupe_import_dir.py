@@ -3,11 +3,11 @@
 
 # Remove duplicate images from a "import directory" by moving them to a trash directory.
 
-from email.mime import base
-import os
 import gc
+import os
+from email.mime import base
 from shutil import move
-from typing import List, Optional, Tuple, Any
+from typing import Any, List, Optional, Tuple
 
 import click
 import humanize
