@@ -115,6 +115,7 @@ def main(
     threshold: float,
     trash_dir: str,
 ):
+    torch.set_float32_matmul_precision('highest')
     if not skip_update and not dry_run:
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
         print("Updating base database...")

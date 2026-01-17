@@ -130,12 +130,13 @@ def update_database(
 
                     if isinstance(result, Exception):
                         image_path = os.path.join(image_dir, rel_path)
-                        t.write(f"Skipping invalid image: {image_path} ({result})")
+                        t.write(f"Skipping: {image_path} ({result})")
                     else:
                         batch_paths.append(rel_path)
                         image_tensor_batch.append(result)
 
                         if len(image_tensor_batch) >= batch_size:
+                            # dispatch!
                             _encode_and_save_batch(encoder, db_dir, batch_paths, image_tensor_batch)
                             batch_paths = []
                             image_tensor_batch = []
