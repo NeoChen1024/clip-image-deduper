@@ -249,15 +249,14 @@ def main(
             # Adjust indices from slice-local [0, ...) back to global indices.
             similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
             # check if this image is already recorded in duplicates (can happen when there's more than 2 duplicates)
-            if image_path in duplicates:
-                return
-            current_dupes = [image_path] + [image_paths[s_idx] for s_idx, _ in similar_images]
-            for img_path in current_dupes:
-                duplicates[img_path] = True
-            similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
-            t.write(f"Found {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
-            if trash_dir is not None:
-                move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run, t)
+            if image_path not in duplicates:
+                current_dupes = [image_path] + [image_paths[s_idx] for s_idx, _ in similar_images]
+                for img_path in current_dupes:
+                    duplicates[img_path] = True
+                similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
+                t.write(f"Found {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
+                if trash_dir is not None:
+                    move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run, t)
 
     dry_run_str = ""
     if dry_run:
