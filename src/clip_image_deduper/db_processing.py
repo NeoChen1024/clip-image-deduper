@@ -8,7 +8,7 @@ import math
 import multiprocessing as mp
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable
 
 import click
 import numpy as np
@@ -39,7 +39,7 @@ def verify_image(image_path: str) -> bool:
         return False
 
 
-def _load_and_prepare_image(image_dir: str, relative_path: str) -> Tuple[str, Union[PIL.Image.Image, Exception]]:
+def _load_and_prepare_image(preprocessor: Callable, image_dir: str, relative_path: str) -> Tuple[str, Union[torch.Tensor, Exception]]:
     """Load and validate a single image, returning either a PIL image or an Exception.
 
     This is intended to be used with ThreadPoolExecutor for asynchronous IO.
@@ -56,7 +56,7 @@ def _load_and_prepare_image(image_dir: str, relative_path: str) -> Tuple[str, Un
             img = img.convert("RGB")
             img.load()
 
-        return relative_path, img
+        return relative_path, preprocessor(img)
     except Exception as e:
         return relative_path, e
 
@@ -65,13 +65,13 @@ def _encode_and_save_batch(
     encoder: CLIPImageEncoder,
     db_dir: str,
     batch_paths: List[str],
-    batch_images: List[PIL.Image.Image],
+    image_tensor_batch: List[torch.Tensor],
 ) -> None:
     """Encode a batch of images and save their embeddings to disk."""
-    if not batch_images:
+    if not image_tensor_batch:
         return
 
-    embeddings = encoder.encode_images(batch_images)
+    embeddings = encoder.encode_images(image_tensor_batch)
     for rel_path, embedding in zip(batch_paths, embeddings):
         data_path = os.path.join(db_dir, f"{rel_path}.npz")
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
@@ -112,7 +112,7 @@ def update_database(
     if candidates:
         t = tqdm.tqdm(total=len(candidates))
         batch_paths: List[str] = []
-        batch_images: List[PIL.Image.Image] = []
+        image_tensor_batch: List[torch.Tensor] = []
 
         # Limit the maximum number of in-flight futures to a small
         # multiple of the encoding batch size to avoid holding an
@@ -123,7 +123,7 @@ def update_database(
             num_candidates = len(candidates)
             for start in range(0, num_candidates, max_in_flight_futures):
                 chunk = candidates[start : start + max_in_flight_futures]
-                futures = [executor.submit(_load_and_prepare_image, image_dir, p) for p in chunk]
+                futures = [executor.submit(_load_and_prepare_image, encoder.get_preprocessor(), image_dir, p) for p in chunk]
 
                 for future in as_completed(futures):
                     rel_path, result = future.result()
@@ -133,18 +133,18 @@ def update_database(
                         t.write(f"Skipping invalid image: {image_path} ({result})")
                     else:
                         batch_paths.append(rel_path)
-                        batch_images.append(result)
+                        image_tensor_batch.append(result)
 
-                        if len(batch_images) >= batch_size:
-                            _encode_and_save_batch(encoder, db_dir, batch_paths, batch_images)
+                        if len(image_tensor_batch) >= batch_size:
+                            _encode_and_save_batch(encoder, db_dir, batch_paths, image_tensor_batch)
                             batch_paths = []
-                            batch_images = []
+                            image_tensor_batch = []
 
                     t.update(1)
 
         # Flush any remaining images.
-        if batch_images:
-            _encode_and_save_batch(encoder, db_dir, batch_paths, batch_images)
+        if image_tensor_batch:
+            _encode_and_save_batch(encoder, db_dir, batch_paths, image_tensor_batch)
 
     if clean_orphans:
         # walk through db_dir to find and remove orphaned data files

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """open_clip model and preprocessing setup for clip_image_deduper."""
-from typing import List, Optional
+from typing import List, Optional, overload
 
 import click
 import numpy as np
@@ -46,13 +46,25 @@ class CLIPImageEncoder:
         del self.model
         torch.cuda.empty_cache()
 
+    def get_preprocessor(self):
+        """Get the preprocessing function. (PIL.Image -> torch.Tensor), to maximize performance."""
+        return self.preprocess
+
+
     @torch.no_grad()
     @torch.compile()
-    def encode_images(self, images: List[PIL.Image.Image]) -> np.ndarray:
+    def preprocess_encode_images(self, images: List[PIL.Image.Image]) -> np.ndarray:
         """Encode a list of images using the CLIP model."""
         # TODO: performance can be improved by doing preprocessing asynchronously in parallel
         image_inputs = torch.stack([self.preprocess(img) for img in images]).to(self.tdtype).to(self.device)  # bottleneck here
         image_features = self.model.encode_image(image_inputs)
+        return image_features.cpu().float().numpy()
+
+    @torch.no_grad()
+    @torch.compile()
+    def encode_images(self, preprocessed_image_tensor: List[torch.Tensor]) -> np.ndarray:
+        """Encode a list of images using the CLIP model."""
+        image_features = self.model.encode_image(torch.stack(preprocessed_image_tensor).to(self.tdtype).to(self.device))
         return image_features.cpu().float().numpy()
 
 
@@ -82,7 +94,7 @@ def main(model_id: str, device: str, dtype: str, image_paths: List[str]):
             print(f"Error processing image {image_path}: {e}")
 
     if images_pil:
-        features = encoder.encode_images(images_pil)
+        features = encoder.preprocess_encode_images(images_pil)
         for img_path, feat in zip(image_paths, features):
             print(f"Image: {img_path}, Feature shape: {feat.shape}")
 
