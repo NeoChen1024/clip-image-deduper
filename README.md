@@ -4,7 +4,7 @@
 
 My own CLIP-based image deduplication toolkit born from dissatisfaction with off-the-shelf solutions. (most of them are either slow, or not suitable for processing my own image directories) It's purely command-line, batch processing (not interactive), designed to handle image datasets so large, that typing `ls` inside the directory will take more than 5 seconds for the listing to be done.
 
-Because it's simplicity (less than 1k lines of Python), processing is all done in memory, which limits how much images it can handle in low memory systems. (it takes about 5KiB of VRAM and system RAM for each image)
+Because of its simplicity (less than 1k lines of Python), processing is all done in memory, which limits how many images it can handle in low-memory systems. (it takes about 5KiB of VRAM and system RAM for each image for a single FP32 embedding)
 
 ## Key features
 
@@ -15,6 +15,12 @@ Because it's simplicity (less than 1k lines of Python), processing is all done i
 * async batched model inference (about 1.5x speedup) and multiprocessing DB loading (about 2x speedup).
 
 ## Installation
+
+Minimum requirements:
+
+* Python 3.11+
+* More than 8GiB of free RAM
+* A working PyTorch install (CUDA optional but recommended if you have a GPU)
 
 Git clone, uv pip install...you know the drill.
 
@@ -29,6 +35,14 @@ $ cd clip-image-deduper
 $ uv venv
 $ source .venv/bin/activate
 $ uv pip install -e .
+```
+
+If you don't use uv, a plain virtualenv + pip flow also works:
+
+```shell
+$ python -m venv .venv
+$ source .venv/bin/activate
+$ pip install -e .
 ```
 
 ## Quickstart
@@ -52,11 +66,23 @@ Dedupe images in an "importing" dir with "base" dir (will remove images from "im
 $ clip-image-import-deduper -bi pic-dir -bd pic-db-dir -ii importing -id import-db-dir -t trash-dir
 ```
 
+### Important CLI options (clip-image-deduper)
+
+Only the most important flags are listed here; run `clip-image-deduper --help` for the full reference.
+
+* `-i, --image-dir`: Directory containing images to process.
+* `-d, --db-dir`: Directory to store the embedding database files (mirrors image-dir structure).
+* `-t, --trash-dir`: Where duplicates are moved. If omitted, files are not moved.
+* `--threshold, -th`: Euclidean distance threshold for considering images as duplicates. Default: `0.1` (lower = stricter).
+* `--keeping-logic, -kl`: Which copy to keep among duplicates: `newest`, `largest`, `highest-quality`, or `pic-dir`.
+* `--device, -c`: Device to run the CLIP model on, e.g. `cuda` or `cpu`. Defaults to `cuda` if available.
+* `--batch-size, -b`: Batch size for image encoding. Adjust based on VRAM.
+* `--dry-run, -n`: Show what would be moved without actually modifying any files.
+
 ## DB Structure & How It Works
 
 The "db" is a directory containing image embeddings that mirrors the image directory structure.
-For each image file, there is a corresponding ".npy" file containing the embedding. (`.npy` extension
-is added to the original image filename, e.g. `picdir/dir-a/image.jpg` ->    `dbdir/dir-a/image.jpg.npy`)
+For each image file, there is a corresponding `.npz` file containing the embedding, with key `"clip_embedding"`. The `.npz` extension is added to the original image filename, e.g. `picdir/dir-a/image.jpg` -> `dbdir/dir-a/image.jpg.npz`.
 
 It uses euclidean distance to calculate similarity (in FP32). (extremely low arithmetic intensity, memory-BW bound)
 
