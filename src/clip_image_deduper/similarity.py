@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 
-default_euclidean_distance_threshold = 1  # same images will have distance 0.0 to 1 depending on encoding model, adjust as needed
+default_euclidean_distance_threshold = 0.1  # same images will have distance 0.0 to 1 depending on encoding model, adjust as needed
 
 
 # slow generic numpy version, for testing and reference
