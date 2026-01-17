@@ -74,8 +74,8 @@ class CLIPImageEncoder:
 @click.option(
     "--dtype",
     "-p",
-    type=click.Choice(["float32", "float16", "bfloat16"], case_sensitive=False),
-    default="float32",
+    type=click.Choice(["fp32", "fp16"], case_sensitive=False),
+    default="fp32",
     help="Data type for model precision. Default is float16 for CUDA and float32 otherwise.",
     show_default=True,
 )
