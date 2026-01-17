@@ -24,6 +24,6 @@ Test platform:
 
 Python 3.12 on Arch Linux, AMD Ryzen 7 5700X3D + NVIDIA RTX4080
 
-Image encoding: about 4~5it/s
+Image encoding: about 15image/s
 
 Dedupe: main.py: ~900image/s for 60k images dataset
