@@ -1,4 +1,4 @@
-# Scripts to perform image deduplication by CLIP similarity
+# High performance image deduplication by CLIP similarity
 
 This repo contains the following scripts:
 
@@ -24,6 +24,6 @@ Test platform:
 
 Python 3.12 on Arch Linux, AMD Ryzen 7 5700X3D + NVIDIA RTX4080
 
-Image encoding: about 15image/s
+Image encoding: about 15 image/s
 
-Dedupe: main.py: ~900image/s for 60k images dataset
+Dedupe: main.py: ~900 image/s for 60k images dataset
