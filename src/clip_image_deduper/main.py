@@ -262,4 +262,4 @@ def main(
     if dry_run:
         dry_run_str = " (dry run, no files were moved)"
 
-    print(f"Dedupelication complete{dry_run_str}, processed {len(image_paths)} images, found {len(duplicates)} duplicates.")
+    print(f"Deduplication complete{dry_run_str}, processed {len(image_paths)} images, found {len(duplicates)} duplicates.")
