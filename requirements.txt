@@ -8,3 +8,10 @@ tqdm
 safetensors
 click
 open_clip_torch
+transformers
+datasets
+prodigy-plus-schedule-free
+prodigyopt
+tensorboard
+jsonlines
+reflink
