@@ -8,7 +8,7 @@ import math
 import multiprocessing as mp
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import click
 import numpy as np
@@ -39,7 +39,9 @@ def verify_image(image_path: str) -> bool:
         return False
 
 
-def _load_and_prepare_image(preprocessor: Callable, image_dir: str, relative_path: str) -> Tuple[str, Union[torch.Tensor, Exception]]:
+def _load_and_prepare_image(
+    preprocessor: Callable, image_dir: str, relative_path: str
+) -> Tuple[str, Union[torch.Tensor, Exception]]:
     """Load and validate a single image, returning either a PIL image or an Exception.
 
     This is intended to be used with ThreadPoolExecutor for asynchronous IO.

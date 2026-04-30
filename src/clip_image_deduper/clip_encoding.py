@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """open_clip model and preprocessing setup for clip_image_deduper."""
+
 from typing import List, Optional, overload
 
 import click
@@ -50,7 +51,6 @@ class CLIPImageEncoder:
         """Get the preprocessing function. (PIL.Image -> torch.Tensor), to maximize performance."""
         return self.preprocess
 
-
     @torch.no_grad()
     @torch.compile()
     def preprocess_encode_images(self, images: List[PIL.Image.Image]) -> np.ndarray:
@@ -70,11 +70,11 @@ class CLIPImageEncoder:
 
 @click.command()
 @click.option("--model-id", "-m", default=default_model_id, help="CLIP model identifier.", show_default=True)
-@click.option("--device", "-d", default="cpu", help="Device to run the model on.", show_default=True)
+@click.option("--device", "-c", default="cpu", help="Device to run the model on.", show_default=True)
 @click.option(
     "--dtype",
     "-p",
-    type=click.Choice(["fp32", "fp16"], case_sensitive=False),
+    type=click.Choice(["fp32", "fp16", "float32", "float16"], case_sensitive=False),
     default="fp32",
     help="Data type for model precision. Default is float16 for CUDA and float32 otherwise.",
     show_default=True,

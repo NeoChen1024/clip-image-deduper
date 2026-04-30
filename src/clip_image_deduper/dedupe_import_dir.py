@@ -5,7 +5,6 @@
 
 import gc
 import os
-from email.mime import base
 from shutil import move
 from typing import Any, List, Optional, Tuple
 
@@ -94,6 +93,14 @@ def move_duplicate(image_path: str, root_dir: str, trash_dir: str, dry_run: bool
 @click.option("--skip-update", is_flag=True, default=False, help="Skip the database update step.")
 @click.option("--dry-run", "-n", is_flag=True, default=False, help="Perform a dry run without making any changes.")
 @click.option(
+    "--batch-size",
+    "-b",
+    type=int,
+    default=4,
+    help="Batch size for processing images when updating the database.",
+    show_default=True,
+)
+@click.option(
     "--threshold",
     "-th",
     type=float,
@@ -114,14 +121,15 @@ def main(
     dry_run: bool,
     threshold: float,
     trash_dir: str,
+    batch_size: int = 4,
 ):
-    torch.set_float32_matmul_precision('highest')
+    torch.set_float32_matmul_precision("highest")
     if not skip_update and not dry_run:
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
         print("Updating base database...")
-        update_database(encoder, base_image_dir, base_db_dir, force_update, clean_orphans)
+        update_database(encoder, base_image_dir, base_db_dir, force_update, clean_orphans, batch_size=batch_size)
         print("Updating import database...")
-        update_database(encoder, import_image_dir, import_db_dir, force_update, clean_orphans)
+        update_database(encoder, import_image_dir, import_db_dir, force_update, clean_orphans, batch_size=batch_size)
         gc.collect()
 
     def db_processing(db_type: str, db_dir: str) -> Tuple[List[str], np.ndarray, torch.Tensor]:

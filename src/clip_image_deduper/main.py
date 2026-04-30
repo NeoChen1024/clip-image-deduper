@@ -46,34 +46,24 @@ def sort_highest_quality(root_dir: str, image_paths: List[str]) -> List[str]:
     return image_paths_sorted
 
 
-# dir structure: Anime, Wallpaper, VWallpaper
-# image sources according to preference (high to low): Pixiv (illust_id_pX.*), Yande.re (yande.re Y_ID *.*)
-#   Danbooru (__*__MD5.*), and Konachan (Konachan.com - K_ID *.*), then others (e.g. Twitter/X or misc image sources)
-match_pixiv = re.compile(r"[0-9]+_p[0-9]+\..*")
-match_yande_re = re.compile(r"yande\.re [0-9]+ .*\..*")
-match_danbooru = re.compile(r"__.*__[0-9a-f]{32}\..*")
-match_konachan = re.compile(r"Konachan\.com - [0-9]+ .*\..*")
+_SOURCE_PRIORITY: list[tuple[re.Pattern, int]] = [
+    (re.compile(r"[0-9]+_p[0-9]+\..*"), 4),  # Pixiv
+    (re.compile(r"yande\.re [0-9]+ .*\..*"), 3),  # Yande.re
+    (re.compile(r"__.*__[0-9a-f]{32}\..*"), 2),  # Danbooru
+    (re.compile(r"Konachan\.com - [0-9]+ .*\..*"), 1),  # Konachan
+    # others default to 0
+]
+
+
+def _source_score(basename: str) -> int:
+    for pattern, score in _SOURCE_PRIORITY:
+        if pattern.match(basename):
+            return score
+    return 0
 
 
 def sort_image_sources(image_paths: List[str]) -> List[str]:
-    image_path_scores = []  # Tuple[int, str]
-    for image_path in image_paths:
-        img_basename = os.path.basename(image_path)
-        score = 0
-        if match_pixiv.match(img_basename):
-            score += 4
-        elif match_yande_re.match(img_basename):
-            score += 3
-        elif match_danbooru.match(img_basename):
-            score += 2
-        elif match_konachan.match(img_basename):
-            score += 1
-        else:
-            score += 0
-        image_path_scores.append((score, image_path))
-    # Sort by score descending
-    image_paths_sorted = sorted(image_path_scores, key=lambda x: x[0], reverse=True)
-    return [p[1] for p in image_paths_sorted]
+    return sorted(image_paths, key=lambda p: _source_score(os.path.basename(p)), reverse=True)
 
 
 def is_wallpaper_dir(image_path: str) -> bool:
@@ -82,18 +72,22 @@ def is_wallpaper_dir(image_path: str) -> bool:
 
 
 def pic_dir_keeping_logic(root_dir: str, image_paths: List[str]) -> str:
-    # First, prefer to keep images in Wallpaper and VWallpaper:
-    wallpaper_images = [p for p in image_paths if is_wallpaper_dir(p)]  # image_path is relative path
-    if len(wallpaper_images) > 0:
-        # there's same images in wallpapers and Anime dir, keep the copies in wallpaper.
-        sources = sort_image_sources(wallpaper_images)
-        hq = sort_highest_quality(root_dir, wallpaper_images)
-        return sources[0]
+    # Prefer wallpaper dirs if any exist; fall back to all paths otherwise.
+    candidates = [p for p in image_paths if is_wallpaper_dir(p)] or image_paths
 
-    # Else, keep from Anime or other dirs
-    sources = sort_image_sources(image_paths)
-    hq = sort_highest_quality(root_dir, image_paths)
-    return sources[0]
+    # Group candidates by source score.
+    by_score: dict[int, list[str]] = {}
+    for p in candidates:
+        s = _source_score(os.path.basename(p))
+        by_score.setdefault(s, []).append(p)
+
+    best = by_score[max(by_score)]
+
+    if len(best) == 1:
+        return best[0]
+
+    # Multiple candidates from the same best source — use quality as tiebreaker.
+    return sort_highest_quality(root_dir, best)[0]
 
 
 def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping_logic: str, dry_run: bool, t):
