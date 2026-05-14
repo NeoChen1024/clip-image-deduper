@@ -7,7 +7,9 @@
 import math
 import multiprocessing as mp
 import os
+import queue
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from threading import Thread
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import click
@@ -41,21 +43,19 @@ def verify_image(image_path: str) -> bool:
 
 def _load_and_prepare_image(
     preprocessor: Callable, image_dir: str, relative_path: str
-) -> Tuple[str, Union[torch.Tensor, Exception]]:
-    """Load and validate a single image, returning the preprocessed tensor or an Exception."""
+) -> Tuple[str, Union[np.ndarray, Exception]]:
+    """Load and validate a single image, returning the preprocessed tensor as numpy or an Exception."""
     image_path = os.path.join(image_dir, relative_path)
 
     try:
-        # Reuse existing validation logic.
         if not verify_image(image_path):
             raise ValueError("Invalid image")
 
-        # Load and convert to RGB; ensure data is fully loaded into memory.
         with PIL.Image.open(image_path) as img:
             img = img.convert("RGB")
             img.load()
 
-        return relative_path, preprocessor(img)
+        return relative_path, preprocessor(img).numpy()
     except Exception as e:
         return relative_path, e
 
@@ -64,13 +64,12 @@ def _encode_and_save_batch(
     encoder: CLIPImageEncoder,
     db_dir: str,
     batch_paths: List[str],
-    image_tensor_batch: List[torch.Tensor],
+    image_np_batch: List[np.ndarray],
 ) -> None:
-    """Encode a batch of images and save their embeddings to disk."""
-    if not image_tensor_batch:
+    if not image_np_batch:
         return
 
-    embeddings = encoder.encode_images(image_tensor_batch)
+    embeddings = encoder.encode_images([torch.from_numpy(arr) for arr in image_np_batch])
     for rel_path, embedding in zip(batch_paths, embeddings):
         data_path = os.path.join(db_dir, f"{rel_path}.npz")
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
@@ -114,43 +113,45 @@ def update_database(
     # Asynchronously load and validate candidate images, then encode them in batches.
     if candidates:
         t = tqdm.tqdm(total=len(candidates))
-        batch_paths: List[str] = []
-        image_tensor_batch: List[torch.Tensor] = []
+        result_queue: queue.Queue = queue.Queue(maxsize=max(batch_size * 2, 1))
+        preprocessor = encoder.get_preprocessor()
 
-        # Limit the maximum number of in-flight futures to a small
-        # multiple of the encoding batch size to avoid holding an
-        # unbounded number of Future objects in memory.
-        max_in_flight_futures = max(batch_size * 2, 1)
-
-        ctx = mp.get_context("spawn")
         max_workers = min(batch_size, os.cpu_count() or 1)
+        ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx, initializer=_init_worker) as executor:
-            num_candidates = len(candidates)
-            for start in range(0, num_candidates, max_in_flight_futures):
-                chunk = candidates[start : start + max_in_flight_futures]
-                futures = [executor.submit(_load_and_prepare_image, encoder.get_preprocessor(), image_dir, p) for p in chunk]
+            def _producer(preprocessor, image_dir, candidates, q):
+                max_futures = q.maxsize
+                for start in range(0, len(candidates), max_futures):
+                    chunk = candidates[start:start + max_futures]
+                    futures = [executor.submit(_load_and_prepare_image, preprocessor, image_dir, p) for p in chunk]
+                    for future in as_completed(futures):
+                        q.put(future.result())
 
-                for future in as_completed(futures):
-                    rel_path, result = future.result()
+            Thread(target=_producer, args=(preprocessor, image_dir, candidates, result_queue), daemon=True).start()
 
-                    if isinstance(result, Exception):
-                        image_path = os.path.join(image_dir, rel_path)
-                        t.write(f"Skipping: {image_path} ({result})")
-                    else:
-                        batch_paths.append(rel_path)
-                        image_tensor_batch.append(result)
+            batch_paths: List[str] = []
+            image_np_batch: List[np.ndarray] = []
+            done = 0
+            while done < len(candidates):
+                rel_path, result = result_queue.get()
 
-                        if len(image_tensor_batch) >= batch_size:
-                            # dispatch!
-                            _encode_and_save_batch(encoder, db_dir, batch_paths, image_tensor_batch)
-                            batch_paths = []
-                            image_tensor_batch = []
+                if isinstance(result, Exception):
+                    image_path = os.path.join(image_dir, rel_path)
+                    t.write(f"Skipping: {image_path} ({result})")
+                else:
+                    batch_paths.append(rel_path)
+                    image_np_batch.append(result)
 
-                    t.update(1)
+                    if len(image_np_batch) >= batch_size:
+                        _encode_and_save_batch(encoder, db_dir, batch_paths, image_np_batch)
+                        batch_paths.clear()
+                        image_np_batch.clear()
 
-        # Flush any remaining images.
-        if image_tensor_batch:
-            _encode_and_save_batch(encoder, db_dir, batch_paths, image_tensor_batch)
+                done += 1
+                t.update()
+
+            if image_np_batch:
+                _encode_and_save_batch(encoder, db_dir, batch_paths, image_np_batch)
 
     if clean_orphans:
         # walk through db_dir to find and remove orphaned data files
