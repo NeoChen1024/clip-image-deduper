@@ -7,7 +7,7 @@
 import math
 import multiprocessing as mp
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import click
@@ -42,10 +42,7 @@ def verify_image(image_path: str) -> bool:
 def _load_and_prepare_image(
     preprocessor: Callable, image_dir: str, relative_path: str
 ) -> Tuple[str, Union[torch.Tensor, Exception]]:
-    """Load and validate a single image, returning either a PIL image or an Exception.
-
-    This is intended to be used with ThreadPoolExecutor for asynchronous IO.
-    """
+    """Load and validate a single image, returning the preprocessed tensor or an Exception."""
     image_path = os.path.join(image_dir, relative_path)
 
     try:
@@ -78,6 +75,10 @@ def _encode_and_save_batch(
         data_path = os.path.join(db_dir, f"{rel_path}.npz")
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
         np.savez_compressed(data_path, clip_embedding=embedding)
+
+
+def _init_worker():
+    torch.set_num_threads(1)
 
 
 def update_database(
@@ -121,7 +122,9 @@ def update_database(
         # unbounded number of Future objects in memory.
         max_in_flight_futures = max(batch_size * 2, 1)
 
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        ctx = mp.get_context("spawn")
+        max_workers = min(batch_size, os.cpu_count() or 1)
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx, initializer=_init_worker) as executor:
             num_candidates = len(candidates)
             for start in range(0, num_candidates, max_in_flight_futures):
                 chunk = candidates[start : start + max_in_flight_futures]
