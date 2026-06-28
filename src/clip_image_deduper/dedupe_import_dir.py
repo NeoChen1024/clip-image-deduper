@@ -91,7 +91,13 @@ def move_duplicate(image_path: str, root_dir: str, trash_dir: str, dry_run: bool
 )
 @click.option("--model-id", "-m", default=default_model_id, help="CLIP model identifier.", show_default=True)
 @click.option("--skip-update", is_flag=True, default=False, help="Skip the database update step.")
-@click.option("--dry-run", "-n", is_flag=True, default=False, help="Perform a dry run without making any changes.")
+@click.option(
+    "--dry-run",
+    "-n",
+    is_flag=True,
+    default=False,
+    help="Preview duplicate moves without moving files. Database files are still refreshed unless --skip-update is set.",
+)
 @click.option(
     "--batch-size",
     "-b",
@@ -124,7 +130,10 @@ def main(
     batch_size: int = 4,
 ):
     torch.set_float32_matmul_precision("highest")
-    if not skip_update and not dry_run:
+    if not skip_update:
+        # Dry-run still needs a fresh DB to produce an accurate preview.
+        # Callers that need a no-write run can combine --dry-run with
+        # --skip-update and accept potentially stale embeddings.
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
         print("Updating base database...")
         update_database(encoder, base_image_dir, base_db_dir, force_update, clean_orphans, batch_size=batch_size)

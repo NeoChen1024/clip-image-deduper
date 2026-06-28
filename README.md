@@ -77,7 +77,7 @@ Only the most important flags are listed here; run `clip-image-deduper --help` f
 * `--keeping-logic, -kl`: Which copy to keep among duplicates: `newest`, `largest`, `highest-quality`, or `pic-dir`.
 * `--device, -c`: Device to run the CLIP model on, e.g. `cuda` or `cpu`. Defaults to `cuda` if available.
 * `--batch-size, -b`: Batch size for image encoding. Adjust based on VRAM.
-* `--dry-run, -n`: Show what would be moved without actually modifying any files.
+* `--dry-run, -n`: Show what would be moved without moving image files. Embedding DB files are still refreshed unless you also pass `--skip-update`.
 
 ## DB Structure & How It Works
 

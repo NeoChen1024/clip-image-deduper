@@ -45,7 +45,11 @@ def find_similar_images_euclidean(
 ) -> List[Tuple[int, float]]:
     """Find similar images in the database based on Euclidean distance.
 
-    image_idx: index of the query image in the database, -1 if not in database
+    image_idx: index of the query image inside ``database``. Pass -1 when the
+    query vector is not literally stored inside the tensor being searched
+    (for example when searching an upper-triangular slice or a foreign DB).
+    Using a global index against a sliced tensor will incorrectly filter out
+    legitimate matches at slice-local index 0.
     image_embedding_1d: (D,) numpy array of the query image embedding
     database: (N, D) torch tensor of the database embeddings
     threshold: distance threshold for considering images as similar

@@ -90,25 +90,83 @@ def pic_dir_keeping_logic(root_dir: str, image_paths: List[str]) -> str:
     return sort_highest_quality(root_dir, best)[0]
 
 
+def select_image_to_keep(root_dir: str, dup_group: List[str], keeping_logic: str) -> str:
+    """Select which image to keep from a duplicate group.
+
+    Keep tie-breakers inside a single tuple key. Chaining two ``max()`` calls
+    looks reasonable, but the second call silently discards the first decision
+    and makes ties depend on input order.
+    """
+    if keeping_logic == "newest":
+        return max(dup_group, key=lambda p: (os.path.getmtime(os.path.join(root_dir, p)), os.path.getsize(os.path.join(root_dir, p))))
+    if keeping_logic == "largest":
+        return max(dup_group, key=lambda p: (os.path.getsize(os.path.join(root_dir, p)), os.path.getmtime(os.path.join(root_dir, p))))
+    if keeping_logic == "highest-quality":
+        return sort_highest_quality(root_dir, dup_group)[0]
+    if keeping_logic == "pic-dir":
+        return pic_dir_keeping_logic(root_dir, dup_group)
+    raise ValueError(f"Unknown keeping logic: {keeping_logic}")
+
+
+def find_duplicate_groups(
+    image_paths: List[str],
+    embeddings_db: np.ndarray,
+    embeddings_torch: torch.Tensor,
+    threshold: float,
+    t,
+) -> List[List[str]]:
+    """Find connected duplicate groups from pairwise similarity edges.
+
+    The dedupe relation is not guaranteed to be a clique: A may match B, B may
+    match C, while A and C fall just outside the threshold. Collect all edges
+    first, then merge connected components, otherwise chain duplicates get
+    skipped once the middle image is marked as "already seen".
+    """
+    parent = list(range(len(image_paths)))
+
+    def find(idx: int) -> int:
+        while parent[idx] != idx:
+            parent[idx] = parent[parent[idx]]
+            idx = parent[idx]
+        return idx
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for idx, image_path in enumerate(t):
+        image_embedding = embeddings_db[idx]  # shape (D)
+
+        # Search only the upper-triangular slice to avoid duplicate work. The
+        # query image is not inside this slice, so self-filtering must be
+        # disabled with image_idx=-1.
+        database_slice_torch = embeddings_torch[idx + 1 :]
+        if database_slice_torch.size(0) == 0:
+            continue
+
+        similar_images = find_similar_images_euclidean(-1, image_embedding, database_slice_torch, threshold=threshold)
+        if not similar_images:
+            continue
+
+        similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
+        similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
+        t.write(f"Found {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
+        for s_idx, _ in similar_images:
+            union(idx, s_idx)
+
+    groups_by_root: dict[int, List[str]] = {}
+    for idx, image_path in enumerate(image_paths):
+        groups_by_root.setdefault(find(idx), []).append(image_path)
+
+    return [group for group in groups_by_root.values() if len(group) > 1]
+
+
 def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping_logic: str, dry_run: bool, t):
     os.makedirs(trash_dir, exist_ok=True)
 
-    # Determine which image to keep based on the keeping logic
-    if keeping_logic == "newest":
-        # add size to break ties
-        to_keep = max(dup_group, key=lambda p: os.path.getsize(os.path.join(root_dir, p)))
-        to_keep = max(dup_group, key=lambda p: os.path.getmtime(os.path.join(root_dir, p)))
-    elif keeping_logic == "largest":
-        # add mtime to break ties
-        to_keep = max(dup_group, key=lambda p: os.path.getmtime(os.path.join(root_dir, p)))
-        to_keep = max(dup_group, key=lambda p: os.path.getsize(os.path.join(root_dir, p)))
-    elif keeping_logic == "highest-quality":
-        to_keep = sort_highest_quality(root_dir, dup_group)[0]
-    elif keeping_logic == "pic-dir":
-        # Keeping logic based on directory structure and image source
-        to_keep = pic_dir_keeping_logic(root_dir, dup_group)
-    else:
-        raise ValueError(f"Unknown keeping logic: {keeping_logic}")
+    to_keep = select_image_to_keep(root_dir, dup_group, keeping_logic)
 
     for img_path in dup_group:
         abs_path = os.path.join(root_dir, img_path)
@@ -172,7 +230,13 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
 )
 @click.option("--model-id", "-m", default=default_model_id, help="CLIP model identifier.", show_default=True)
 @click.option("--skip-update", is_flag=True, default=False, help="Skip the database update step.")
-@click.option("--dry-run", "-n", is_flag=True, default=False, help="Perform a dry run without making any changes.")
+@click.option(
+    "--dry-run",
+    "-n",
+    is_flag=True,
+    default=False,
+    help="Preview duplicate moves without moving files. Database files are still refreshed unless --skip-update is set.",
+)
 @click.option(
     "--threshold",
     "-th",
@@ -204,7 +268,10 @@ def main(
     batch_size: int = 4,
 ):
     torch.set_float32_matmul_precision("highest")  # use highest precision for best accuracy in distance calculations
-    if not skip_update and not dry_run:
+    if not skip_update:
+        # Dry-run is about avoiding file moves; skipping DB refresh would make
+        # the preview stale. Use --skip-update when a no-write preview matters
+        # more than accuracy.
         print("Updating database...")
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
         update_database(encoder, image_dir, db_dir, force_update, clean_orphans, batch_size=batch_size)
@@ -225,35 +292,19 @@ def main(
     embeddings_torch = torch.from_numpy(embeddings_db).to(device).float()
 
     print("Finding duplicates...")
-    duplicates = {}  # dict: {"image_path": bool} to mark images already recorded as duplicates
     t = tqdm.tqdm(image_paths, desc="Processing images", unit="image")
+    duplicate_groups = find_duplicate_groups(image_paths, embeddings_db, embeddings_torch, threshold, t)
+    duplicate_image_count = sum(len(group) - 1 for group in duplicate_groups)
 
-    for idx, image_path in enumerate(t):
-        image_embedding = embeddings_db[idx]  # shape (D)
-
-        # Only compare this image against images that come after it in the
-        # list to avoid checking each pair twice (i,j) and (j,i).
-        # (upper-triangular comparison)
-        database_slice_torch = embeddings_torch[idx + 1 :]
-        if database_slice_torch.size(0) == 0:
-            continue
-
-        similar_images = find_similar_images_euclidean(idx, image_embedding, database_slice_torch, threshold=threshold)
-        if similar_images:
-            # Adjust indices from slice-local [0, ...) back to global indices.
-            similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
-            # check if this image is already recorded in duplicates (can happen when there's more than 2 duplicates)
-            if image_path not in duplicates:
-                current_dupes = [image_path] + [image_paths[s_idx] for s_idx, _ in similar_images]
-                for img_path in current_dupes:
-                    duplicates[img_path] = True
-                similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
-                t.write(f"Found {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
-                if trash_dir is not None:
-                    move_duplicates(current_dupes, image_dir, trash_dir, keeping_logic, dry_run, t)
+    if trash_dir is not None:
+        for dup_group in duplicate_groups:
+            move_duplicates(dup_group, image_dir, trash_dir, keeping_logic, dry_run, t)
 
     dry_run_str = ""
     if dry_run:
         dry_run_str = " (dry run, no files were moved)"
 
-    print(f"Deduplication complete{dry_run_str}, processed {len(image_paths)} images, found {len(duplicates)} duplicates.")
+    print(
+        f"Deduplication complete{dry_run_str}, processed {len(image_paths)} images, "
+        f"found {duplicate_image_count} duplicates across {len(duplicate_groups)} groups."
+    )
