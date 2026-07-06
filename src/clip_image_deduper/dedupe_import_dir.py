@@ -139,6 +139,8 @@ def main(
         update_database(encoder, base_image_dir, base_db_dir, force_update, clean_orphans, batch_size=batch_size)
         print("Updating import database...")
         update_database(encoder, import_image_dir, import_db_dir, force_update, clean_orphans, batch_size=batch_size)
+        encoder.cleanup()
+        del encoder
         gc.collect()
 
     def db_processing(db_type: str, db_dir: str) -> Tuple[List[str], np.ndarray, torch.Tensor]:
@@ -184,3 +186,11 @@ def main(
         dry_run_str = " (dry run, no files were moved)"
 
     print(f"Deduplication complete., processed {len(import_image_paths)} images, found {duplicate_count} duplicates.{dry_run_str}")
+
+    del base_embeddings_torch
+    del import_embeddings_torch
+    del base_embeddings_db
+    del import_embeddings_db
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.compiler.reset()

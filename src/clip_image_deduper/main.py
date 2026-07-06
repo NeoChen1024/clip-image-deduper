@@ -275,6 +275,9 @@ def main(
         print("Updating database...")
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
         update_database(encoder, image_dir, db_dir, force_update, clean_orphans, batch_size=batch_size)
+        encoder.cleanup()
+        del encoder
+        gc.collect()
 
     print("Loading database...")
     image_paths, database = load_database(db_dir)
@@ -308,3 +311,9 @@ def main(
         f"Deduplication complete{dry_run_str}, processed {len(image_paths)} images, "
         f"found {duplicate_image_count} duplicates across {len(duplicate_groups)} groups."
     )
+
+    del embeddings_torch
+    del embeddings_db
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.compiler.reset()

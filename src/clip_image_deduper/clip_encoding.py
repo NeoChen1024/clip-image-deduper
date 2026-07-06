@@ -41,11 +41,11 @@ class CLIPImageEncoder:
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(model_id, device=device, jit=True, precision=dtype)
         self.tokenizer = open_clip.get_tokenizer(model_id)
 
-    # unload model from memory when done
-    def __del__(self):
-        self.model.to("cpu")  # move to cpu before deleting
+    def cleanup(self):
+        self.model.to("cpu")
         del self.model
         torch.cuda.empty_cache()
+        torch.compiler.reset()
 
     def get_preprocessor(self):
         """Get the preprocessing function. (PIL.Image -> torch.Tensor), to maximize performance."""

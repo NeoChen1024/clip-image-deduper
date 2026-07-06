@@ -39,6 +39,7 @@ def euclidean_distance_torch_1_to_many(
     return d[0].cpu().numpy()
 
 
+@torch.no_grad()
 @torch.compile()
 def find_similar_images_euclidean(
     image_idx: int, image_embedding_1d: np.ndarray, database: torch.Tensor, threshold: float = default_euclidean_distance_threshold
