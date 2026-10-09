@@ -22,6 +22,7 @@ default 1152-dimensional model, so a million images need about 2.3 GiB of RAM an
 ## Installation
 
 Requirements: Python 3.11+, a working PyTorch install (CUDA strongly recommended), and RAM/VRAM for your collection.
+The default model is downloaded from the Hugging Face Hub on first use (1.6 GiB).
 
 ```shell
 git clone https://github.com/NeoChen1024/clip-image-deduper
@@ -66,12 +67,16 @@ clip-image-deduper encode-test a.jpg a_copy.png b.jpg
 * `-k, --keeping-logic` (default `largest`) and `--keeping-config`: see below.
 * `-n, --dry-run`: report what would be moved without moving. The database is still refreshed; add `--skip-update`
   for a run that writes nothing at all.
-* `-m, --model-id`: any open_clip model. A database is bound to the model it was encoded with; switching models on an
-  existing database requires `-f, --force-update`, which re-encodes everything.
+* `-m, --model-id`: a timm model name; any CLIP/SigLIP image tower timm ships works (e.g. `vit_pe_core_bigG_14_448.fb`).
+  A database is bound to the model it was encoded with; switching models on an existing database requires
+  `-f, --force-update`, which re-encodes everything.
 * `-b, --batch-size`: images per forward pass; raise it if VRAM allows. Also sets the number of decoder processes.
+* `--compile`: `torch.compile` the model. About 10% faster (the model is compute bound), 5-20 s warm-up per run, and
+  the batch size becomes fixed. Compiled kernels round slightly differently: embeddings differ from eager ones by up
+  to ~0.05, so don't mix compiled and eager encodes in one database if you run close to the threshold.
 * Files whose extension Pillow does not recognize are ignored. Files that fail to decode are skipped with a warning and
-  retried on the next run. Unlike most libraries' defaults, very large images and truncated files are accepted, like an
-  image viewer would.
+  retried on the next run. Unlike Pillow's defaults, very large images, truncated files and PNGs with bad checksums on
+  metadata chunks (e.g. the `iCCP` chunk some Pixiv uploads carry) are accepted, like an image viewer would.
 
 ### Keeping policies
 
@@ -117,9 +122,13 @@ computes exact L2 distances with FP32 arithmetic. Elsewhere they are upcast to F
 matmul form loses about 1e-2 near zero distance, which is why the kernel exists. Peak VRAM for 100k images is about
 0.7 GiB on the Triton path and 1.1 GiB on the fallback.
 
-**Model.** The default is `hf-hub:timm/ViT-SO400M-16-SigLIP2-512`. `PE-Core-bigG-14-448` was the previous default
-and is noticeably more sensitive to compression artifacts: a JPEG q90 re-save of a picture lands 5 to 15 away from the
-original, overlapping with the distance between different pictures.
+**Model.** Only the image tower is needed, so it is loaded straight from timm (`vit_so400m_patch16_siglip_512.v2_webli`,
+1.6 GiB; the full open_clip checkpoint with the text tower is 4.3 GiB). open_clip builds these towers from timm anyway,
+and the embeddings are bit-identical to its `encode_image`. One trap: timm's default eval transform center-crops 90%
+and the transformers processor resizes bilinearly; both shift embeddings by up to several units. The encoder forces
+`crop_pct=1.0, crop_mode="squash"` with bicubic resampling, which is what the models were trained with.
+`PE-Core-bigG-14-448` was the previous default and is noticeably more sensitive to compression artifacts: a JPEG q90
+re-save of a picture lands 5 to 15 away from the original, overlapping with the distance between different pictures.
 
 ## Roadmap
 

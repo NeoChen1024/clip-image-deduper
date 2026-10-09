@@ -31,7 +31,7 @@ class CliTests(unittest.TestCase):
         ):
             result = self.runner.invoke(cli, ["dedupe", "-i", self.img, "-d", "db.sqlite", "-n", "--trash-dir", "trash", "-c", "cpu", "-m", "model"])
         self.assertEqual(result.exit_code, 0, result.output)
-        enc_cls.assert_called_once_with(model_id="model", device="cpu", dtype=None)
+        enc_cls.assert_called_once_with(model_id="model", device="cpu", dtype=None, compile=False, batch_size=4)
         enc_cls.return_value.close.assert_called_once()
         upd.assert_called_once()
         self.assertEqual(upd.call_args.args[1:3], (self.img, "db.sqlite"))
