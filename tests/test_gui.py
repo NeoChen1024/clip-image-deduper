@@ -184,6 +184,16 @@ class GuiTests(unittest.TestCase):
         with ReviewDB(self.review_path) as db:
             self.assertEqual({m.path: m.keep for m in db.members(self.win.current.id)}, {"a.png": True, "sub/b.png": True})
 
+    def test_zoom_buttons_reflect_state(self):
+        self.assertTrue(self.win.zoom_actions["fit"].isChecked())
+        self.key(Qt.Key.Key_0)
+        self.assertTrue(self.win.zoom_actions["actual"].isChecked())
+        self.assertFalse(self.win.zoom_actions["fit"].isChecked())
+        self.win.canvas.zoom(1.5)
+        self.assertFalse(self.win.zoom_actions["actual"].isChecked() or self.win.zoom_actions["fit"].isChecked())
+        self.key(Qt.Key.Key_Home)
+        self.assertTrue(self.win.zoom_actions["fit"].isChecked())
+
     def test_filter(self):
         self.win.filter.setCurrentText("pending")
         self.win.wait_idle()

@@ -113,8 +113,17 @@ class ReviewWindow(QMainWindow):
             self.mode_group.addAction(action)
             self.mode_actions[mode] = action
         self.mode_actions["side"].setChecked(True)
-        self._action(bar, "Fit", lambda: self.canvas.fit())
-        self._action(bar, "100%", lambda: self.canvas.actual_size())
+        bar.addSeparator()
+        self.zoom_group = QActionGroup(self)
+        self.zoom_group.setExclusive(True)
+        self.zoom_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)  # neither is checked after a manual zoom
+        self.zoom_actions = {
+            "fit": self._action(bar, "Fit", lambda: self.canvas.fit(), checkable=True),
+            "actual": self._action(bar, "100%", lambda: self.canvas.actual_size(), checkable=True),
+        }
+        for action in self.zoom_actions.values():
+            self.zoom_group.addAction(action)
+        self.zoom_actions["fit"].setChecked(True)
         bar.addSeparator()
         self._action(bar, "Previous (Z)", lambda: self.navigate(-1), "Alt+Left")
         self._action(bar, "Next (X)", lambda: self.navigate(1), "Alt+Right")
@@ -140,6 +149,7 @@ class ReviewWindow(QMainWindow):
         self.canvas = CompareCanvas()
         self.canvas.navigate.connect(self.navigate)
         self.canvas.mode_changed.connect(self._mode_changed)
+        self.canvas.zoom_changed.connect(self._zoom_changed)
 
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -434,6 +444,10 @@ class ReviewWindow(QMainWindow):
     def _diff_ready(self, images, generation: int, key) -> None:
         if generation == self.generation and self.diff_key == key:
             self.canvas.set_diff(*images)
+
+    def _zoom_changed(self, state: str) -> None:
+        for name, action in self.zoom_actions.items():
+            action.setChecked(name == state)
 
     def _mode_changed(self, mode: str) -> None:
         self.mode_actions[mode].setChecked(True)

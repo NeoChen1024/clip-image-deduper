@@ -80,6 +80,7 @@ class CompareCanvas(QWidget):
 
     navigate = Signal(int)  # +1 / -1 from the wheel
     mode_changed = Signal(str)
+    zoom_changed = Signal(str)  # "fit", "actual" or "free"
 
     def __init__(self) -> None:
         super().__init__()
@@ -97,6 +98,7 @@ class CompareCanvas(QWidget):
         self.diff: QImage | None = None
         self.diff_plain: QImage | None = None
         self._auto_fit = True
+        self.zoom_state = "fit"
         self._syncing = False
         for view in (self.left, self.right):
             view.wheel.connect(self._wheel)
@@ -180,9 +182,15 @@ class CompareCanvas(QWidget):
     def fit(self) -> None:
         """Fit each visible view to its own image. The two pictures may have very different resolutions, so they
         get different scales; zooming keeps multiplying both, and scrolling is linked proportionally."""
-        self._auto_fit = True
+        self._set_zoom_state("fit")
         for view in self._active_views():
             view.fitInView(view.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _set_zoom_state(self, state: str) -> None:
+        self._auto_fit = state == "fit"
+        if state != self.zoom_state:
+            self.zoom_state = state
+            self.zoom_changed.emit(state)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
@@ -190,12 +198,12 @@ class CompareCanvas(QWidget):
             self.fit()
 
     def actual_size(self) -> None:
-        self._auto_fit = False
+        self._set_zoom_state("actual")
         for view in (self.left, self.right):
             view.resetTransform()
 
     def zoom(self, factor: float) -> None:
-        self._auto_fit = False
+        self._set_zoom_state("free")
         for view in (self.left, self.right):
             view.scale(factor, factor)
 
