@@ -21,12 +21,17 @@ class StubEncoder:
 
     model_id = "stub"
     dim = 8
+    array_dtype = np.dtype(np.float16)
 
     def get_preprocessor(self):
         return _fake_preprocess
 
-    def encode_images(self, tensors):
-        return np.random.default_rng(len(tensors)).random((len(tensors), self.dim)).astype(np.float32)
+    def submit(self, arrays):
+        assert all(a.dtype == self.array_dtype and a.shape == (3, 4, 4) for a in arrays), "workers must deliver fully preprocessed arrays"
+        return len(arrays)
+
+    def collect(self, pending):
+        return np.random.default_rng(pending).random((pending, self.dim)).astype(np.float32)
 
 
 def _make_images(image_dir):
@@ -53,7 +58,7 @@ class PipelineTests(unittest.TestCase):
             image_dir, db_path = os.path.join(tmp, "img"), os.path.join(tmp, "db.sqlite")
             _make_images(image_dir)
             with self.assertLogs("clip_image_deduper.encoding_pipeline", level="WARNING") as logs:
-                update_database(StubEncoder(), image_dir, db_path, batch_size=2)
+                update_database(StubEncoder(), image_dir, db_path, batch_size=2, workers=2)
             self.assertTrue(any("broken.jpg" in m for m in logs.output))
             records, emb = load_database(db_path)
             self.assertEqual([r.path for r in records], ["a.png", "c.gif", "d.webp", "sub/b.jpg"])

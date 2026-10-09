@@ -45,6 +45,7 @@ model_options = _options(
 
 update_options = _options(
     click.option("--batch-size", "-b", type=int, default=4, show_default=True, help="Images per model forward pass; raise if VRAM allows."),
+    click.option("--workers", "-j", type=int, default=None, help="Image decoder processes, 2x this many reads are kept in flight (default: number of CPUs; raise it on network/slow storage). Independent of --batch-size."),
     click.option("--force-update", "-f", is_flag=True, help="Re-encode every image, ignoring modification times. Also rebinds the DB to --model-id."),
     click.option("--clean-orphans/--no-clean-orphans", default=True, show_default=True, help="Remove DB entries whose image no longer exists."),
     click.option("--skip-update", is_flag=True, help="Do not touch the database, only match what is already in it."),
@@ -92,11 +93,11 @@ def _encoder(model_id: str, device: str, dtype: str | None = None, *, compile_: 
         encoder.close()
 
 
-def _update(encoder: CLIPImageEncoder, image_dir: str, db: str, *, force_update: bool, clean_orphans: bool, batch_size: int) -> None:
+def _update(encoder: CLIPImageEncoder, image_dir: str, db: str, *, force_update: bool, clean_orphans: bool, batch_size: int, workers: int | None) -> None:
     logger.info("Updating database %s from %s", db, image_dir)
     try:
         update_database(
-            encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size,
+            encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers,
             progress_factory=_progress_factory("Encoding", "image"),
         )
     except RuntimeError as e:
@@ -145,14 +146,14 @@ def cli(verbose: bool) -> None:
 @click.option("--keeping-logic", "-k", default="largest", show_default=True, help="Which copy of a duplicate group to keep (a policy name).")
 @click.option("--keeping-config", type=click.Path(exists=True, dir_okay=False), default=None, help="TOML file adding/overriding keeping policies.")
 def dedupe(
-    image_dir: str, db: str, model_id: str, device: str, compile_: bool, batch_size: int, force_update: bool, clean_orphans: bool,
+    image_dir: str, db: str, model_id: str, device: str, compile_: bool, batch_size: int, workers: int | None, force_update: bool, clean_orphans: bool,
     skip_update: bool, threshold: float, trash_dir: str | None, dry_run: bool, keeping_logic: str, keeping_config: str | None,
 ) -> None:
     """Find duplicates within one image directory."""
     policy = _policy(keeping_logic, keeping_config)  # validate before spending time on encoding
     if not skip_update:
         with _encoder(model_id, device, compile_=compile_, batch_size=batch_size) as encoder:
-            _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
+            _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
 
     records, index = _load_index(db, device)
     paths = [r.path for r in records]
@@ -181,14 +182,14 @@ def dedupe(
 @update_options
 @match_options
 def import_(
-    base_image_dir: str, base_db: str, import_image_dir: str, import_db: str, model_id: str, device: str, compile_: bool, batch_size: int,
+    base_image_dir: str, base_db: str, import_image_dir: str, import_db: str, model_id: str, device: str, compile_: bool, batch_size: int, workers: int | None,
     force_update: bool, clean_orphans: bool, skip_update: bool, threshold: float, trash_dir: str | None, dry_run: bool,
 ) -> None:
     """Remove images from an import directory that already exist in a base directory."""
     if not skip_update:
         with _encoder(model_id, device, compile_=compile_, batch_size=batch_size) as encoder:
-            _update(encoder, base_image_dir, base_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
-            _update(encoder, import_image_dir, import_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
+            _update(encoder, base_image_dir, base_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
+            _update(encoder, import_image_dir, import_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
 
     base_records, base_index = _load_index(base_db, device, "base database")
     import_records, import_index = _load_index(import_db, device, "import database")
@@ -218,12 +219,12 @@ def import_(
 @model_options
 @update_options
 def update_db(
-    image_dir: str, db: str, model_id: str, device: str, compile_: bool, batch_size: int, force_update: bool, clean_orphans: bool, skip_update: bool
+    image_dir: str, db: str, model_id: str, device: str, compile_: bool, batch_size: int, workers: int | None, force_update: bool, clean_orphans: bool, skip_update: bool
 ) -> None:
     """Only (re)encode images into the database, without matching."""
     if not skip_update:
         with _encoder(model_id, device, compile_=compile_, batch_size=batch_size) as encoder:
-            _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
+            _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
     records, embeddings = load_database(db)
     logger.info("%s holds %d embeddings of shape %s", db, len(records), embeddings.shape[1:])
 

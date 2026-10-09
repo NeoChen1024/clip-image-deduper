@@ -17,7 +17,8 @@ default 1152-dimensional model, so a million images need about 2.3 GiB of RAM an
   directly, avoiding the `|a|^2+|b|^2-2ab` cancellation that costs `torch.cdist` about 1e-2 of precision on
   unnormalized CLIP embeddings.
 * Configurable keeping policies (which copy of a duplicate group survives), declared in TOML; four built in.
-* Image decoding in worker processes, overlapped with model inference.
+* Three-stage pipeline: decoder processes read and fully preprocess images, the main thread gathers batches, and
+  the GPU runs one batch while the next is being decoded. Decoder count and batch size are independent knobs.
 
 ## Installation
 
@@ -70,10 +71,15 @@ clip-image-deduper encode-test a.jpg a_copy.png b.jpg
 * `-m, --model-id`: a timm model name; any CLIP/SigLIP image tower timm ships works (e.g. `vit_pe_core_bigG_14_448.fb`).
   A database is bound to the model it was encoded with; switching models on an existing database requires
   `-f, --force-update`, which re-encodes everything.
-* `-b, --batch-size`: images per forward pass; raise it if VRAM allows. Also sets the number of decoder processes.
-* `--compile`: `torch.compile` the model. About 10% faster (the model is compute bound), 5-20 s warm-up per run, and
-  the batch size becomes fixed. Compiled kernels round slightly differently: embeddings differ from eager ones by up
-  to ~0.05, so don't mix compiled and eager encodes in one database if you run close to the threshold.
+* `-b, --batch-size`: images per forward pass; raise it if VRAM allows. The default model is compute bound already at
+  4, so this barely changes throughput.
+* `-j, --workers`: decoder processes (default: one per CPU); twice as many reads are kept in flight. On network or
+  spinning storage the reads are the bottleneck, so a value above the CPU count helps there.
+* `--compile`: `torch.compile` the model. About 10% faster, 5-20 s warm-up per run, and the batch size becomes
+  fixed.
+* FP16 inference is not batch-invariant: the same image encoded in a different batch (size or neighbours) comes out
+  up to ~0.04 away, with or without `--compile`. That is far below the default threshold and the ~0.4+ of a lossy
+  copy, but it is the reason distances between near-identical files are not exactly zero.
 * Files whose extension Pillow does not recognize are ignored. Files that fail to decode are skipped with a warning and
   retried on the next run. Unlike Pillow's defaults, very large images, truncated files and PNGs with bad checksums on
   metadata chunks (e.g. the `iCCP` chunk some Pixiv uploads carry) are accepted, like an image viewer would.
@@ -121,6 +127,15 @@ On CUDA with Triton (bundled with PyTorch on Linux) the embeddings stay FP16 on 
 computes exact L2 distances with FP32 arithmetic. Elsewhere they are upcast to FP32 and `torch.cdist` is used; its
 matmul form loses about 1e-2 near zero distance, which is why the kernel exists. Peak VRAM for 100k images is about
 0.7 GiB on the Triton path and 1.1 GiB on the fallback.
+
+**Encoding pipeline.** `--workers` processes each open a file, decode it, and run the model's full preprocessing
+(resize, normalize, cast to the model dtype), so the main process only ever sees ready-to-stack arrays. It keeps
+`2 * workers` decode jobs in flight, gathers results into batches as they complete (a slow file never blocks the
+others), stages each batch in pinned memory and submits it to the GPU without waiting; the previous batch's result is
+collected and written to the database only once the next one is queued. Memory is bounded by `2 * workers` arrays
+plus two batches. Measured on 1000 cached 4 MB images (RTX 4080, 16 CPUs): the GPU alone does 65 img/s at any batch
+size, 16 decoders alone 74 img/s, and the pipeline reaches 42 img/s against 24 img/s for the previous version at the
+same batch size of 4.
 
 **Model.** Only the image tower is needed, so it is loaded straight from timm (`vit_so400m_patch16_siglip_512.v2_webli`,
 1.6 GiB; the full open_clip checkpoint with the text tower is 4.3 GiB). open_clip builds these towers from timm anyway,

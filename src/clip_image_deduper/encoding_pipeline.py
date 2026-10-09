@@ -16,7 +16,7 @@ import PIL.ImageFile
 import torch
 
 from .db_store import EmbeddingDB, ImageRecord, ModelMismatchError
-from .encoder import CLIPImageEncoder
+from .encoder import CLIPImageEncoder, PendingBatch
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,13 @@ def is_image_path(relative_path: str) -> bool:
     return os.path.splitext(relative_path)[1].lower() in IMAGE_EXTENSIONS
 
 
-def _load_image(preprocessor: Callable, image_dir: str, relative_path: str) -> tuple[str, tuple[ImageRecord, np.ndarray] | Exception]:
-    """Worker: decode one image and run the model's preprocessing. Returns the record + tensor, or the exception.
+def _load_image(
+    preprocessor: Callable, array_dtype: np.dtype, image_dir: str, relative_path: str
+) -> tuple[str, tuple[ImageRecord, np.ndarray] | Exception]:
+    """Worker: decode one image and run the model's full preprocessing (resize, normalize, dtype cast).
+
+    The main process gets back a ready-to-stack ``(C, H, W)`` array in the model's dtype, so all it has to do for
+    the GPU is gather a batch and copy it over. Returns the record + array, or the exception.
 
     Any failure here means "skip this file", so the catch is deliberately broad: a corrupt file must not take the
     whole run down, and Pillow raises a wide variety of exception types for broken inputs.
@@ -54,9 +59,9 @@ def _load_image(preprocessor: Callable, image_dir: str, relative_path: str) -> t
         with PIL.Image.open(image_path) as img:
             fmt = img.format or os.path.splitext(relative_path)[1].lstrip(".").upper()
             width, height = img.size
-            tensor = preprocessor(img.convert("RGB")).numpy()  # animated formats: first frame
+            array = preprocessor(img.convert("RGB")).numpy().astype(array_dtype, copy=False)  # animated: first frame
         record = ImageRecord(relative_path, st.st_mtime, st.st_size, width, height, fmt)
-        return relative_path, (record, tensor)
+        return relative_path, (record, array)
     except Exception as e:  # noqa: BLE001 - see docstring
         return relative_path, e
 
@@ -87,6 +92,10 @@ def find_candidates(image_dir: str, index: dict[str, float], *, force: bool = Fa
     return candidates, seen
 
 
+def default_workers() -> int:
+    return os.cpu_count() or 1
+
+
 def encode_images(
     encoder: CLIPImageEncoder,
     db: EmbeddingDB,
@@ -94,44 +103,67 @@ def encode_images(
     candidates: Sequence[str],
     *,
     batch_size: int,
+    workers: int | None = None,
     progress: Callable[[int], object] | None = None,
 ) -> int:
-    """Decode ``candidates`` in worker processes, encode in batches of ``batch_size`` and store. Returns #stored.
+    """Decode ``candidates`` in ``workers`` processes, encode in batches of ``batch_size`` and store. Returns #stored.
 
-    Decoding runs ahead of the GPU with a bounded window of in-flight futures, so memory stays bounded and the model
-    never waits on a single slow file. No helper thread: the main thread alternates between waiting for decoded
-    images and running the model.
+    Three stages overlap:
+
+    * ``workers`` processes decode and fully preprocess images. The number of workers is independent of the batch
+      size; it is a function of how fast the CPU can decode, the batch size of how much VRAM there is.
+    * The main thread keeps ``2 * workers`` decode jobs in flight (so no worker ever waits for the main thread),
+      gathers finished arrays into batches and submits each batch to the device without waiting for it.
+    * The device runs the previous batch while the main thread is back to collecting decoded images; the result is
+      fetched and written to the database only when the next batch has been submitted (or at the end).
+
+    Memory: at most ``2 * workers`` preprocessed arrays plus two batches live at any time.
     """
     if not candidates:
         return 0
+    if workers is None:
+        workers = default_workers()
+    workers = max(1, workers)
+    window = 2 * workers
     preprocessor = encoder.get_preprocessor()
-    max_workers = max(1, min(batch_size, os.cpu_count() or 1))
-    window = max(batch_size * 2, max_workers)
+    array_dtype = encoder.array_dtype
     stored = 0
     batch: list[tuple[ImageRecord, np.ndarray]] = []
+    in_flight: tuple[list[ImageRecord], PendingBatch] | None = None
+
+    def finish() -> None:
+        nonlocal stored, in_flight
+        if in_flight is None:
+            return
+        records, pending = in_flight
+        in_flight = None
+        embeddings = encoder.collect(pending)
+        db.upsert(zip(records, embeddings))
+        stored += len(records)
 
     def flush() -> None:
-        nonlocal stored
+        nonlocal in_flight
         if not batch:
             return
-        embeddings = encoder.encode_images([torch.from_numpy(t) for _, t in batch])
-        db.upsert((rec, emb) for (rec, _), emb in zip(batch, embeddings))
-        stored += len(batch)
+        records = [rec for rec, _ in batch]
+        pending = encoder.submit([arr for _, arr in batch])
         batch.clear()
+        finish()  # the previous batch has had the whole decode interval to complete
+        in_flight = (records, pending)
 
     todo = iter(candidates)
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp.get_context("spawn"), initializer=_init_worker) as pool:
-        pending: set[Future] = set()
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"), initializer=_init_worker) as pool:
+        pending_jobs: set[Future] = set()
 
         def refill() -> None:
             for rel in todo:
-                pending.add(pool.submit(_load_image, preprocessor, image_dir, rel))
-                if len(pending) >= window:
+                pending_jobs.add(pool.submit(_load_image, preprocessor, array_dtype, image_dir, rel))
+                if len(pending_jobs) >= window:
                     break
 
         refill()
-        while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+        while pending_jobs:
+            done, pending_jobs = wait(pending_jobs, return_when=FIRST_COMPLETED)
             for future in done:
                 rel, result = future.result()
                 if isinstance(result, Exception):
@@ -144,6 +176,7 @@ def encode_images(
                     progress(1)
             refill()
     flush()
+    finish()
     return stored
 
 
@@ -155,11 +188,13 @@ def update_database(
     force_update: bool = False,
     clean_orphans: bool = True,
     batch_size: int = 4,
+    workers: int | None = None,
     progress_factory: Callable[[int], Callable[[int], object]] | None = None,
 ) -> None:
     """Bring ``db_path`` up to date with the images under ``image_dir``.
 
-    ``progress_factory(total)`` may return a callable that is invoked with increments as images are processed.
+    ``workers`` is the number of decoder processes (default: one per CPU). ``progress_factory(total)`` may return a
+    callable that is invoked with increments as images are processed.
     """
     with EmbeddingDB(db_path) as db:
         try:
@@ -172,7 +207,7 @@ def update_database(
         logger.info("%d images, %d to encode", len(seen), len(candidates))
         if candidates:
             progress = progress_factory(len(candidates)) if progress_factory else None
-            encode_images(encoder, db, image_dir, candidates, batch_size=batch_size, progress=progress)
+            encode_images(encoder, db, image_dir, candidates, batch_size=batch_size, workers=workers, progress=progress)
 
         if clean_orphans:
             orphans = [p for p in index if p not in seen]

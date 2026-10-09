@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import PIL.Image
@@ -33,6 +34,19 @@ _PRECISIONS: dict[str, torch.dtype] = {
     "bfloat16": torch.bfloat16,
 }
 precision_choices = tuple(_PRECISIONS)
+
+
+@dataclass(slots=True)
+class PendingBatch:
+    """A forward pass that has been queued on the device but not synchronized yet (see ``CLIPImageEncoder.submit``).
+
+    ``host`` is the pinned staging buffer; it is kept alive here because the asynchronous copy may still be reading
+    from it.
+    """
+
+    out: torch.Tensor
+    n: int
+    host: torch.Tensor
 
 
 class CLIPImageEncoder:
@@ -84,24 +98,52 @@ class CLIPImageEncoder:
         """The PIL -> tensor transform, picklable so worker processes can run it."""
         return self.preprocess
 
-    @torch.no_grad()
-    def encode_images(self, preprocessed: Sequence[torch.Tensor]) -> np.ndarray:
-        """Encode already-preprocessed image tensors. Returns an ``(N, D)`` float32 array."""
-        n = len(preprocessed)
-        batch = torch.stack(list(preprocessed)).to(self.device, self.tdtype)
-        if self._compiled_batch is not None and n != self._compiled_batch:
-            if n > self._compiled_batch:
-                raise ValueError(f"Got {n} images but the compiled model is fixed at batch_size={self._compiled_batch}")
-            pad = torch.zeros((self._compiled_batch - n, *batch.shape[1:]), device=batch.device, dtype=batch.dtype)
-            batch = torch.cat([batch, pad])
-        return self._forward(batch)[:n].float().cpu().numpy()
+    @property
+    def array_dtype(self) -> np.dtype:
+        """numpy dtype loaders should hand over: the model's own dtype so the host->device copy is as small as
+        possible, except bf16 which numpy lacks (fp32 then, cast on the device)."""
+        return np.dtype(np.float16) if self.tdtype == torch.float16 else np.dtype(np.float32)
 
     @torch.no_grad()
+    def submit(self, preprocessed: Sequence[np.ndarray]) -> PendingBatch:
+        """Queue one forward pass on the device and return without waiting for it.
+
+        The arrays must already be fully preprocessed (``get_preprocessor`` output, ``(C, H, W)``), ideally in
+        ``array_dtype``. They are gathered into one pinned host buffer, copied asynchronously and run; call
+        ``collect`` for the result. On CUDA this lets the caller go back to feeding the decoders while the GPU works.
+        """
+        n = len(preprocessed)
+        if n == 0:
+            raise ValueError("Empty batch")
+        rows = n
+        if self._compiled_batch is not None:
+            if n > self._compiled_batch:
+                raise ValueError(f"Got {n} images but the compiled model is fixed at batch_size={self._compiled_batch}")
+            rows = self._compiled_batch
+        pin = self.device.startswith("cuda")
+        host = torch.empty((rows, *preprocessed[0].shape), dtype=self.tdtype, pin_memory=pin)
+        for i, a in enumerate(preprocessed):
+            host[i].copy_(torch.from_numpy(np.ascontiguousarray(a)))
+        if rows > n:
+            host[n:].zero_()
+        batch = host.to(self.device, non_blocking=pin)
+        out = self._forward(batch)[:n]
+        return PendingBatch(out, n, host)
+
+    def collect(self, pending: PendingBatch) -> np.ndarray:
+        """Wait for a submitted batch and return its ``(N, D)`` float32 embeddings."""
+        return pending.out.float().cpu().numpy()
+
+    def encode_images(self, preprocessed: Sequence[torch.Tensor | np.ndarray]) -> np.ndarray:
+        """Encode already-preprocessed image tensors synchronously. Returns an ``(N, D)`` float32 array."""
+        arrays = [t.numpy() if isinstance(t, torch.Tensor) else t for t in preprocessed]
+        return self.collect(self.submit(arrays))
+
     def encode_pil_images(self, images: Sequence[PIL.Image.Image]) -> np.ndarray:
         """Preprocess and encode PIL images (convenience for small inputs; respects the compiled batch size)."""
-        tensors = [self.preprocess(img.convert("RGB")) for img in images]
-        step = self._compiled_batch or len(tensors) or 1
-        chunks = [self.encode_images(tensors[i : i + step]) for i in range(0, len(tensors), step)]
+        arrays = [self.preprocess(img.convert("RGB")).to(self.tdtype if self.tdtype != torch.bfloat16 else torch.float32).numpy() for img in images]
+        step = self._compiled_batch or len(arrays) or 1
+        chunks = [self.encode_images(arrays[i : i + step]) for i in range(0, len(arrays), step)]
         return np.concatenate(chunks) if chunks else np.empty((0, 0), dtype=np.float32)
 
     def close(self) -> None:
