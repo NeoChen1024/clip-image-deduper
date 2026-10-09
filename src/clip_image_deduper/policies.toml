@@ -1,0 +1,58 @@
+# Built-in keeping policies: which copy of a duplicate group to keep.
+#
+# A policy is an ordered list of criteria. Candidates are sorted lexicographically by them and the first one is
+# kept, so the first criterion decides unless it ties, then the second, and so on. Three kinds of criterion:
+#
+#   { attr = "<numeric>",  prefer = "max" | "min" }   numbers: size, mtime, width, height, pixels
+#   { attr = "<string>",   match  = 'regex' | ['regex', ...] }
+#                                                      regex (re.search) on path, dirname, basename or ext.
+#                                                      With a list, candidates rank by the first pattern they match;
+#                                                      candidates matching nothing rank last. If nobody matches the
+#                                                      criterion is a no-op and the next one decides.
+#   { attr = "format",     order  = ["PNG", "JPEG", ...] }
+#                                                      categorical: rank by position in the list, unlisted last.
+#
+# Users can add or override policies with --keeping-config my.toml, using the same [policy.<name>] layout.
+# Use single-quoted TOML strings for regexes so backslashes need no escaping.
+
+[policy.newest]
+description = "Most recently modified file; larger file breaks ties."
+criteria = [
+    { attr = "mtime", prefer = "max" },
+    { attr = "size", prefer = "max" },
+]
+
+[policy.largest]
+description = "Largest file; newer file breaks ties."
+criteria = [
+    { attr = "size", prefer = "max" },
+    { attr = "mtime", prefer = "max" },
+]
+
+[policy.highest-quality]
+description = "Most pixels, then lossless/less-lossy formats, then larger file, then newer."
+criteria = [
+    { attr = "pixels", prefer = "max" },
+    { attr = "format", order = ["PNG", "TIFF", "BMP", "WEBP", "AVIF", "JPEG", "GIF"] },
+    { attr = "size", prefer = "max" },
+    { attr = "mtime", prefer = "max" },
+]
+
+# Site-specific policy for the author's own picture directory: prefer anything already sorted into a wallpaper
+# folder, then prefer sources whose filenames carry the original post id (so the image can be traced back),
+# then fall back to quality.
+[policy.pic-dir]
+description = "Wallpaper folders first, then by source site (Pixiv > yande.re > Danbooru > Konachan), then quality."
+criteria = [
+    { attr = "dirname", match = 'Wallpaper' },
+    { attr = "basename", match = [
+        '^[0-9]+_p[0-9]+\.',            # Pixiv: 12345678_p0.jpg
+        '^yande\.re [0-9]+ ',           # yande.re 123456 tag tag.jpg
+        '^__.*__[0-9a-f]{32}\.',        # Danbooru: __character_series__<md5>.jpg
+        '^Konachan\.com - [0-9]+ ',     # Konachan.com - 123456 tag tag.jpg
+    ] },
+    { attr = "pixels", prefer = "max" },
+    { attr = "format", order = ["PNG", "TIFF", "BMP", "WEBP", "AVIF", "JPEG", "GIF"] },
+    { attr = "size", prefer = "max" },
+    { attr = "mtime", prefer = "max" },
+]

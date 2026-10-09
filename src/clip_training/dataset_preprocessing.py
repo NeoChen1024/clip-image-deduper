@@ -20,7 +20,7 @@ import tqdm
 from jsonlines import jsonlines
 from transformers import CLIPProcessor  # for trial tokenization
 
-from clip_image_deduper.db_processing import walk_directory_relative
+from clip_image_deduper.encoding_pipeline import walk_directory_relative
 
 default_clip_model = "laion/CLIP-ViT-L-14-laion2B-s32B-b82K"
 max_clip_tokens = 75
@@ -78,7 +78,7 @@ def process_image_caption(args):
 @click.option(
     "--mode", type=click.Choice(file_op_modes), default="copy", help="File operation mode for handling images", show_default=True
 )
-def __main__(input_dataset_dir, output_dir, clip_model, mode):
+def main(input_dataset_dir, output_dir, clip_model, mode):
     metadata_output_path = os.path.join(output_dir, "metadata.jsonl")
     image_output_dir = os.path.join(output_dir, "images")
     os.makedirs(image_output_dir, exist_ok=True)
@@ -125,4 +125,4 @@ def __main__(input_dataset_dir, output_dir, clip_model, mode):
 
 
 if __name__ == "__main__":
-    __main__()
+    main()

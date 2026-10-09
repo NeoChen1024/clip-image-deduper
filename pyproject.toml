@@ -1,20 +1,48 @@
 [project]
 name = "clip-image-deduper"
-version = "0.0.0a0"
-description = "Scripts for image deduplication using CLIP model."
+version = "0.1.0"
+description = "Image deduplication by CLIP embedding similarity."
 authors = [{name = "Neo_Chen", email = "chenkolei@gmail.com"}]
-dynamic = ["dependencies"]
+requires-python = ">=3.11"
+dependencies = [
+    "click",
+    "humanize",
+    "numpy",
+    "open_clip_torch",
+    "pillow",
+    "torch",
+    "torchvision",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# Dataset preprocessing and CLIP fine-tuning scripts (src/clip_training), not needed for deduplication.
+training = [
+    "accelerate",
+    "datasets",
+    "jsonlines",
+    "prodigy-plus-schedule-free",
+    "prodigyopt",
+    "reflink",
+    "rich",
+    "safetensors",
+    "tensorboard",
+    "transformers",
+]
+
+[project.scripts]
+clip-image-deduper = "clip_image_deduper.cli:cli"
+clip-dataset-preprocess = "clip_training.dataset_preprocessing:main"
 
 [build-system]
-# Minimum requirements for the build system to execute.
-requires = ["setuptools"]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
-
-# only search for modules in the src directory
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+clip_image_deduper = ["policies.toml"]
 
 [tool.black]
 line-length = 132
@@ -22,9 +50,3 @@ target-version = ['py311']
 
 [tool.isort]
 profile = "black"
-
-[project.scripts]
-clip-image-encoding-test = "clip_image_deduper.clip_encoding:main"
-clip-image-deduper-db-test = "clip_image_deduper.db_processing:main"
-clip-image-deduper = "clip_image_deduper.main:main"
-clip-image-import-deduper= "clip_image_deduper.dedupe_import_dir:main"

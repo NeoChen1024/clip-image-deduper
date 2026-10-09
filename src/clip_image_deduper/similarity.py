@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Exact pairwise Euclidean distances between embeddings, in blocks, on CPU or GPU."""
+
+from __future__ import annotations
 
 import importlib.util
-from typing import Iterator, List, Optional, Tuple
+from collections.abc import Iterator
 
 import numpy as np
 import torch
@@ -37,8 +38,8 @@ class DistanceIndex:
 
             self._kernel = l2_distance_T
             # Transpose on the host so the device never holds two copies of the matrix at once.
-            self.dbT: Optional[torch.Tensor] = host.to(torch.float16).T.contiguous().to(self.device)  # (D, N)
-            self.db: Optional[torch.Tensor] = None
+            self.dbT: torch.Tensor | None = host.to(torch.float16).T.contiguous().to(self.device)  # (D, N)
+            self.db: torch.Tensor | None = None
         else:
             self._kernel = None
             self.dbT = None
@@ -47,12 +48,13 @@ class DistanceIndex:
     @property
     def nbytes(self) -> int:
         t = self.dbT if self.dbT is not None else self.db
-        return t.numel() * t.element_size()  # type: ignore[union-attr]
+        assert t is not None
+        return t.numel() * t.element_size()
 
     def backend_name(self) -> str:
         return "triton fp16-store/fp32-math direct kernel" if self.use_triton else "torch.cdist fp32"
 
-    def distances(self, start: int, end: int, other: Optional["DistanceIndex"] = None, other_start: int = 0) -> torch.Tensor:
+    def distances(self, start: int, end: int, other: DistanceIndex | None = None, other_start: int = 0) -> torch.Tensor:
         """Distances from rows ``[start, end)`` of this index to rows ``[other_start, N_other)`` of ``other``.
 
         Returns a ``(end - start, N_other - other_start)`` fp32 tensor on the device. ``other`` defaults to ``self``.
@@ -60,16 +62,17 @@ class DistanceIndex:
         other = self if other is None else other
         if other.use_triton != self.use_triton or other.device != self.device:
             raise ValueError("Both indices must live on the same device and backend")
-        if self.use_triton:
-            return self._kernel(self.dbT[:, start:end], other.dbT[:, other_start:])  # type: ignore[index, misc]
-        return torch.cdist(self.db[start:end], other.db[other_start:], p=2)  # type: ignore[index]
+        if self._kernel is not None and self.dbT is not None and other.dbT is not None:
+            return self._kernel(self.dbT[:, start:end], other.dbT[:, other_start:])
+        assert self.db is not None and other.db is not None
+        return torch.cdist(self.db[start:end], other.db[other_start:], p=2)
 
-    def query_block_size(self, other: Optional["DistanceIndex"] = None, budget_bytes: int = default_distance_block_bytes) -> int:
+    def query_block_size(self, other: DistanceIndex | None = None, budget_bytes: int = default_distance_block_bytes) -> int:
         """Number of query rows per block so that one distance block stays under ``budget_bytes``."""
         n_cols = (self if other is None else other).n
         return max(1, min(1024, budget_bytes // (4 * max(n_cols, 1))))
 
-    def iter_blocks(self, other: Optional["DistanceIndex"] = None, budget_bytes: int = default_distance_block_bytes) -> Iterator[Tuple[int, int]]:
+    def iter_blocks(self, other: DistanceIndex | None = None, budget_bytes: int = default_distance_block_bytes) -> Iterator[tuple[int, int]]:
         block = self.query_block_size(other, budget_bytes)
         for start in range(0, self.n, block):
             yield start, min(start + block, self.n)
@@ -79,7 +82,7 @@ class DistanceIndex:
         self.dbT = None
 
 
-def find_close_pairs_self(index: DistanceIndex, threshold: float, start: int, end: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def find_close_pairs_self(index: DistanceIndex, threshold: float, start: int, end: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pairs ``(i, j, d)`` with ``start <= i < end``, ``j > i`` and ``d <= threshold`` within a single index.
 
     Only the strictly upper triangle is searched, so every unordered pair is reported exactly once over all blocks.
@@ -93,7 +96,7 @@ def find_close_pairs_self(index: DistanceIndex, threshold: float, start: int, en
 
 def find_close_pairs_cross(
     queries: DistanceIndex, base: DistanceIndex, threshold: float, start: int, end: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pairs ``(i, j, d)`` with ``start <= i < end`` from ``queries`` and any ``j`` in ``base`` with ``d <= threshold``."""
     d = queries.distances(start, end, other=base)
     ii, jj = (d <= threshold).nonzero(as_tuple=True)
@@ -135,7 +138,7 @@ def euclidean_distance_torch_1_to_many(
 @torch.no_grad()
 def find_similar_images_euclidean(
     image_idx: int, image_embedding_1d: np.ndarray, database: torch.Tensor, threshold: float = default_euclidean_distance_threshold
-) -> List[Tuple[int, float]]:
+) -> list[tuple[int, float]]:
     """Find similar images in the database based on Euclidean distance (one query vs. a tensor).
 
     image_idx: index of the query image inside ``database``. Pass -1 when the

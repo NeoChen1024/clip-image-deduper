@@ -1,0 +1,254 @@
+"""Command line interface: ``clip-image-deduper <subcommand>``."""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+from collections.abc import Callable, Generator
+
+import click
+import humanize
+import numpy as np
+import torch
+import tqdm
+
+from .db_store import ImageRecord, load_database
+from .dedupe import find_cross_duplicates, find_duplicate_groups, move_to_trash, trash_duplicate_groups
+from .encoder import CLIPImageEncoder, default_model_id, precision_choices
+from .encoding_pipeline import update_database
+from .keeping import PolicyError, load_policies
+from .log import setup_logging
+from .similarity import DistanceIndex, default_euclidean_distance_threshold, euclidean_distance
+
+logger = logging.getLogger(__name__)
+
+default_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+# -- shared options --------------------------------------------------------------------------------------------------
+
+
+def _options(*decorators: Callable) -> Callable:
+    def apply(f: Callable) -> Callable:
+        for d in reversed(decorators):
+            f = d(f)
+        return f
+
+    return apply
+
+
+model_options = _options(
+    click.option("--model-id", "-m", default=default_model_id, show_default=True, help="open_clip model identifier."),
+    click.option("--device", "-c", default=default_device, show_default=True, help="Device to run the model and the matching on."),
+)
+
+update_options = _options(
+    click.option("--batch-size", "-b", type=int, default=4, show_default=True, help="Images per model forward pass; raise if VRAM allows."),
+    click.option("--force-update", "-f", is_flag=True, help="Re-encode every image, ignoring modification times. Also rebinds the DB to --model-id."),
+    click.option("--clean-orphans/--no-clean-orphans", default=True, show_default=True, help="Remove DB entries whose image no longer exists."),
+    click.option("--skip-update", is_flag=True, help="Do not touch the database, only match what is already in it."),
+)
+
+match_options = _options(
+    click.option(
+        "--threshold", "-t", type=float, default=default_euclidean_distance_threshold, show_default=True,
+        help="Euclidean distance at or below which two images count as duplicates (lower = stricter).",
+    ),
+    click.option("--trash-dir", type=click.Path(file_okay=False), default=None, help="Move duplicates here (mirroring their relative paths). Omit to only report."),
+    click.option("--dry-run", "-n", is_flag=True, help="Report what would be moved without moving. The DB is still refreshed unless --skip-update."),
+)
+
+image_dir_arg = click.option("--image-dir", "-i", type=click.Path(exists=True, file_okay=False), required=True, help="Directory of images.")
+db_arg = click.option("--db", "-d", type=click.Path(dir_okay=False), required=True, help="SQLite embedding database for --image-dir (created if missing).")
+
+
+# -- helpers ---------------------------------------------------------------------------------------------------------
+
+
+def _progress_factory(desc: str, unit: str) -> Callable[[int], Callable[[int], object]]:
+    def factory(total: int) -> Callable[[int], object]:
+        bar = tqdm.tqdm(total=total, desc=desc, unit=unit)
+        return bar.update
+
+    return factory
+
+
+@contextlib.contextmanager
+def _progress(total: int, desc: str, unit: str = "image") -> Generator[Callable[[int], object], None, None]:
+    bar = tqdm.tqdm(total=total, desc=desc, unit=unit)
+    try:
+        yield bar.update
+    finally:
+        bar.close()
+
+
+@contextlib.contextmanager
+def _encoder(model_id: str, device: str, dtype: str | None = None) -> Generator[CLIPImageEncoder, None, None]:
+    encoder = CLIPImageEncoder(model_id=model_id, device=device, dtype=dtype)
+    try:
+        yield encoder
+    finally:
+        encoder.close()
+
+
+def _update(encoder: CLIPImageEncoder, image_dir: str, db: str, *, force_update: bool, clean_orphans: bool, batch_size: int) -> None:
+    logger.info("Updating database %s from %s", db, image_dir)
+    try:
+        update_database(
+            encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size,
+            progress_factory=_progress_factory("Encoding", "image"),
+        )
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _load_index(db: str, device: str, what: str = "database") -> tuple[list[ImageRecord], DistanceIndex]:
+    records, embeddings = load_database(db)
+    if not records:
+        raise click.ClickException(f"No entries in the {what} {db}. Run an update first.")
+    index = DistanceIndex(embeddings, device)
+    logger.info(
+        "Loaded %s: %d images, dim %d, %s on %s (%s)",
+        what, index.n, index.dim, humanize.naturalsize(index.nbytes, binary=True), device, index.backend_name(),
+    )
+    return records, index
+
+
+def _policy(name: str, config: str | None):
+    try:
+        policies = load_policies(config)
+    except (PolicyError, OSError) as e:
+        raise click.ClickException(f"Cannot load keeping policies: {e}") from e
+    if name not in policies:
+        raise click.ClickException(f"Unknown keeping policy {name!r}. Available: {', '.join(sorted(policies))}")
+    return policies[name]
+
+
+# -- commands --------------------------------------------------------------------------------------------------------
+
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--verbose", "-v", is_flag=True, help="Debug logging.")
+def cli(verbose: bool) -> None:
+    """Image deduplication by CLIP embedding similarity."""
+    setup_logging(verbose)
+    torch.set_float32_matmul_precision("highest")  # distance math must not silently use TF32
+
+
+@cli.command()
+@image_dir_arg
+@db_arg
+@model_options
+@update_options
+@match_options
+@click.option("--keeping-logic", "-k", default="largest", show_default=True, help="Which copy of a duplicate group to keep (a policy name).")
+@click.option("--keeping-config", type=click.Path(exists=True, dir_okay=False), default=None, help="TOML file adding/overriding keeping policies.")
+def dedupe(
+    image_dir: str, db: str, model_id: str, device: str, batch_size: int, force_update: bool, clean_orphans: bool, skip_update: bool,
+    threshold: float, trash_dir: str | None, dry_run: bool, keeping_logic: str, keeping_config: str | None,
+) -> None:
+    """Find duplicates within one image directory."""
+    policy = _policy(keeping_logic, keeping_config)  # validate before spending time on encoding
+    if not skip_update:
+        with _encoder(model_id, device) as encoder:
+            _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
+
+    records, index = _load_index(db, device)
+    paths = [r.path for r in records]
+    with _progress(index.n, "Matching") as progress:
+        groups = find_duplicate_groups(paths, index, threshold, progress)
+    index.release()
+
+    duplicates = sum(len(g) - 1 for g in groups)
+    moved = 0
+    if trash_dir is not None and groups:
+        moved = trash_duplicate_groups(groups, records, image_dir, trash_dir, policy, dry_run=dry_run)
+    logger.info(
+        "Done: %d images, %d duplicates in %d groups%s%s",
+        index.n, duplicates, len(groups),
+        f", {moved} files moved" if trash_dir is not None else "",
+        " (dry run, nothing moved)" if dry_run else "",
+    )
+
+
+@cli.command("import")
+@click.option("--base-image-dir", type=click.Path(exists=True, file_okay=False), required=True, help="Directory of images already in the collection.")
+@click.option("--base-db", type=click.Path(dir_okay=False), required=True, help="Embedding database for --base-image-dir.")
+@click.option("--import-image-dir", type=click.Path(exists=True, file_okay=False), required=True, help="Directory of images to be imported.")
+@click.option("--import-db", type=click.Path(dir_okay=False), required=True, help="Embedding database for --import-image-dir.")
+@model_options
+@update_options
+@match_options
+def import_(
+    base_image_dir: str, base_db: str, import_image_dir: str, import_db: str, model_id: str, device: str, batch_size: int,
+    force_update: bool, clean_orphans: bool, skip_update: bool, threshold: float, trash_dir: str | None, dry_run: bool,
+) -> None:
+    """Remove images from an import directory that already exist in a base directory."""
+    if not skip_update:
+        with _encoder(model_id, device) as encoder:
+            _update(encoder, base_image_dir, base_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
+            _update(encoder, import_image_dir, import_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
+
+    base_records, base_index = _load_index(base_db, device, "base database")
+    import_records, import_index = _load_index(import_db, device, "import database")
+    base_paths = [r.path for r in base_records]
+    import_paths = [r.path for r in import_records]
+    with _progress(import_index.n, "Matching") as progress:
+        hits = find_cross_duplicates(import_paths, import_index, base_paths, base_index, threshold, progress)
+    base_index.release()
+    import_index.release()
+
+    moved = 0
+    if trash_dir is not None:
+        for i in sorted(hits):
+            if move_to_trash(import_image_dir, import_paths[i], trash_dir, dry_run=dry_run):
+                moved += 1
+    logger.info(
+        "Done: %d import images, %d already present in base (%d matches)%s%s",
+        import_index.n, len(hits), sum(hits.values()),
+        f", {moved} files moved" if trash_dir is not None else "",
+        " (dry run, nothing moved)" if dry_run else "",
+    )
+
+
+@cli.command("update-db")
+@image_dir_arg
+@db_arg
+@model_options
+@update_options
+def update_db(image_dir: str, db: str, model_id: str, device: str, batch_size: int, force_update: bool, clean_orphans: bool, skip_update: bool) -> None:
+    """Only (re)encode images into the database, without matching."""
+    if not skip_update:
+        with _encoder(model_id, device) as encoder:
+            _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size)
+    records, embeddings = load_database(db)
+    logger.info("%s holds %d embeddings of shape %s", db, len(records), embeddings.shape[1:])
+
+
+@cli.command("encode-test")
+@model_options
+@click.option("--dtype", type=click.Choice(precision_choices, case_sensitive=False), default=None, help="Model precision (default: fp16 on CUDA, fp32 otherwise).")
+@click.argument("image_paths", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False))
+def encode_test(model_id: str, device: str, dtype: str | None, image_paths: tuple[str, ...]) -> None:
+    """Encode a few images and print their pairwise distance matrix (for picking a threshold)."""
+    import PIL.Image
+
+    with _encoder(model_id, device, dtype) as encoder:
+        images = []
+        for p in image_paths:
+            try:
+                with PIL.Image.open(p) as img:
+                    images.append(img.convert("RGB"))
+            except (OSError, PIL.UnidentifiedImageError) as e:
+                logger.warning("Skipping %s: %s", p, e)
+        if not images:
+            raise click.ClickException("No readable images given.")
+        features = encoder.encode_pil_images(images)
+    np.set_printoptions(precision=4, suppress=True, linewidth=200)
+    click.echo(f"Feature matrix shape: {features.shape}")
+    click.echo("Euclidean distance matrix:")
+    click.echo(euclidean_distance(features, features))
+
+
+if __name__ == "__main__":
+    cli()

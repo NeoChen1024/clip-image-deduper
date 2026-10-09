@@ -1,114 +1,127 @@
-# High performance image deduplication by CLIP similarity
+# Image deduplication by CLIP similarity
 
-## Description
+My own CLIP-based image deduplication toolkit, born from dissatisfaction with off-the-shelf solutions (most of them are
+either slow or not suitable for my own image directories). Purely command-line, batch processing, designed for image
+collections so large that `ls` in the directory takes more than 5 seconds.
 
-My own CLIP-based image deduplication toolkit born from dissatisfaction with off-the-shelf solutions. (most of them are either slow, or not suitable for processing my own image directories) It's purely command-line, batch processing (not interactive), designed to handle image datasets so large, that typing `ls` inside the directory will take more than 5 seconds for the listing to be done.
-
-Because of its simplicity (about 1k lines of Python), processing is all done in memory, which limits how many images it can handle in low-memory systems. Embeddings are stored and held on the GPU in FP16, so each image costs about 2.5KiB of VRAM and system RAM for a 1152-dimensional embedding; a 1M-image database fits in about 2.5GiB.
+Everything is held in memory: embeddings are stored and kept on the GPU in FP16, about 2.3 KiB per image for the
+default 1152-dimensional model, so a million images need about 2.3 GiB of RAM and VRAM.
 
 ## Key features
 
-* High performance (as fast as humanly possible on image encoding and matching)
-* Incremental embedding DB (a single SQLite file, FP16) with mtime-based updates, orphan cleanup, and model-id checking
-* Multiple duplicate-keeping strategies (newest, largest, highest-quality, pic-dir, can be extended quite easily)
-* GPU support: matching 100k images against each other takes about a second on an RTX 4080-class GPU
-* Exact distances: on CUDA a small Triton kernel reads FP16 embeddings and computes `sum((a-b)^2)` in FP32 directly, avoiding the `|a|^2+|b|^2-2ab` cancellation that costs `torch.cdist` ~1e-2 of precision on unnormalized CLIP embeddings
-* async batched model inference (about 1.5x speedup)
+* Incremental embedding database: one SQLite file per image directory, updated by mtime, orphans cleaned up, bound to
+  the model it was encoded with.
+* Fast matching: 100k images against each other in about a second on an RTX 4080-class GPU. Queries are processed in
+  blocks, so the work is a few hundred large kernels instead of one memory-bound pass per image.
+* Exact distances: on CUDA a small Triton kernel reads the FP16 embeddings and computes `sum((a-b)^2)` in FP32
+  directly, avoiding the `|a|^2+|b|^2-2ab` cancellation that costs `torch.cdist` about 1e-2 of precision on
+  unnormalized CLIP embeddings.
+* Configurable keeping policies (which copy of a duplicate group survives), declared in TOML; four built in.
+* Image decoding in worker processes, overlapped with model inference.
 
 ## Installation
 
-Minimum requirements:
-
-* Python 3.11+
-* More than 8GiB of free RAM
-* A working PyTorch install (CUDA optional but recommended if you have a GPU)
-
-Git clone, uv pip install...you know the drill.
+Requirements: Python 3.11+, a working PyTorch install (CUDA strongly recommended), and RAM/VRAM for your collection.
 
 ```shell
-$ git clone https://github.com/NeoChen1024/clip-image-deduper
+git clone https://github.com/NeoChen1024/clip-image-deduper
+cd clip-image-deduper
+uv venv && source .venv/bin/activate
+uv pip install -e .
 ```
 
-Then install it inside venv, I recommend using uv to manage it (it's going take quite a bit of space because of PyTorch):
+A plain `python -m venv .venv` + `pip install -e .` works too. `pip install -e '.[training]'` adds the dependencies of
+the CLIP fine-tuning scripts under `src/clip_training`, which are not needed for deduplication.
+
+## Usage
+
+One command with subcommands; `clip-image-deduper <subcommand> --help` lists every option.
+
+Find duplicates within a directory and move the losers to a trash directory:
 
 ```shell
-$ cd clip-image-deduper
-$ uv venv
-$ source .venv/bin/activate
-$ uv pip install -e .
+clip-image-deduper dedupe -i pictures -d pictures.sqlite --trash-dir trash -k highest-quality
 ```
 
-If you don't use uv, a plain virtualenv + pip flow also works:
+Remove images from an "importing" directory that already exist in a "base" collection:
 
 ```shell
-$ python -m venv .venv
-$ source .venv/bin/activate
-$ pip install -e .
+clip-image-deduper import --base-image-dir pictures --base-db pictures.sqlite \
+                          --import-image-dir incoming --import-db incoming.sqlite --trash-dir trash
 ```
 
-## Quickstart
-
-It installs the following commands:
-
-* clip-image-deduper: The default deduper implementation, for deduping a image directory with itself.
-* clip-image-import-deduper: Alternative deduper implementation, for deduping a "importing" image directory with a "base" dir.
-* clip-image-deduper-db-test: Test DB encoding and loading speed
-* clip-image-encoding-test: Test a set of images' euclidean distance with each other
-
-Dedupe images in a directory:
+Only (re)encode a directory into its database, or print the distance matrix of a few images to pick a threshold:
 
 ```shell
-$ clip-image-deduper -i pic-dir -d pic.sqlite -t trash-dir
+clip-image-deduper update-db -i pictures -d pictures.sqlite
+clip-image-deduper encode-test a.jpg a_copy.png b.jpg
 ```
 
-Dedupe images in an "importing" dir with "base" dir (will remove images from "importing" when same image is found in "base"):
+### Options worth knowing
 
-```shell
-$ clip-image-import-deduper -bi pic-dir -bd pic.sqlite -ii importing -id import.sqlite -t trash-dir
+* `-t, --threshold` (default `0.1`): Euclidean distance at or below which two images are duplicates. With the default
+  model, bit-identical re-encodes are well under 0.1; a JPEG q90 re-save, a WebP or a 50% downscale of the same picture
+  land roughly between 0.4 and 3, and different pictures at 5 and above. Raise the threshold if you want lossy copies
+  caught too; `encode-test` on a few known pairs is the quickest way to calibrate.
+* `-k, --keeping-logic` (default `largest`) and `--keeping-config`: see below.
+* `-n, --dry-run`: report what would be moved without moving. The database is still refreshed; add `--skip-update`
+  for a run that writes nothing at all.
+* `-m, --model-id`: any open_clip model. A database is bound to the model it was encoded with; switching models on an
+  existing database requires `-f, --force-update`, which re-encodes everything.
+* `-b, --batch-size`: images per forward pass; raise it if VRAM allows. Also sets the number of decoder processes.
+* Files whose extension Pillow does not recognize are ignored. Files that fail to decode are skipped with a warning and
+  retried on the next run. Unlike most libraries' defaults, very large images and truncated files are accepted, like an
+  image viewer would.
+
+### Keeping policies
+
+A policy is an ordered list of criteria over the metadata stored in the database (size, mtime, width, height, pixels,
+format, and regexes on the path). Duplicates are sorted by the criteria and the first one is kept. Built in, from
+`src/clip_image_deduper/policies.toml`:
+
+| name | keeps |
+|---|---|
+| `newest` | latest mtime, then larger file |
+| `largest` | largest file, then newer |
+| `highest-quality` | most pixels, then PNG > TIFF > BMP > WebP > AVIF > JPEG > GIF, then larger file, then newer |
+| `pic-dir` | files in a `Wallpaper` folder, then by source site in the filename (Pixiv > yande.re > Danbooru > Konachan), then as `highest-quality` |
+
+`pic-dir` encodes the author's own collection layout; it is there as an example of a site-specific policy. Add your
+own or override a built-in with `--keeping-config my.toml`:
+
+```toml
+[policy.originals-first]
+description = "Prefer the raw/ folder, then the biggest file"
+criteria = [
+    { attr = "dirname", match = '^raw/' },
+    { attr = "size", prefer = "max" },
+]
 ```
 
-### Important CLI options (clip-image-deduper)
+`policies.toml` documents the three criterion kinds (`prefer`, `match`, `order`).
 
-Only the most important flags are listed here; run `clip-image-deduper --help` for the full reference.
+## How it works
 
-* `-i, --image-dir`: Directory containing images to process.
-* `-d, --db`: SQLite file storing the embedding database (created if missing). A database is bound to the model it was encoded with; switching `--model-id` requires `--force-update`.
-* `-t, --trash-dir`: Where duplicates are moved. If omitted, files are not moved.
-* `--threshold, -th`: Euclidean distance threshold for considering images as duplicates. Default: `0.1` (lower = stricter).
-* `--keeping-logic, -kl`: Which copy to keep among duplicates: `newest`, `largest`, `highest-quality`, or `pic-dir`.
-* `--device, -c`: Device to run the CLIP model on, e.g. `cuda` or `cpu`. Defaults to `cuda` if available.
-* `--batch-size, -b`: Batch size for image encoding. Adjust based on VRAM.
-* `--dry-run, -n`: Show what would be moved without moving image files. The embedding DB is still refreshed unless you also pass `--skip-update`.
+**Database.** Table `embeddings` has one row per image: `path` (relative to the image directory), `mtime`, `size`,
+`width`, `height`, `format` as observed at encoding time, and the raw little-endian float16 embedding. Table `meta`
+records `model_id`, `dim`, `dtype` and `schema_version`. FP16 storage is lossless: the model runs in FP16 on CUDA, so
+every value it emits is already an FP16 number. On update, stored mtimes are compared with the files on disk; changed
+or new images are (re)encoded and rows without a file are deleted. Writes are committed per batch, so an interrupted
+run keeps its progress.
 
-## DB Structure & How It Works
+**Matching.** Embeddings are loaded as one `(N, D)` array and uploaded once. The self-dedupe searches the upper
+triangle of the distance matrix in blocks of rows (block size chosen to keep a distance block under 256 MiB), collects
+all pairs under the threshold and merges them into connected components, since A~B and B~C does not imply A~C.
+On CUDA with Triton (bundled with PyTorch on Linux) the embeddings stay FP16 on the device and `l2_triton.py`
+computes exact L2 distances with FP32 arithmetic. Elsewhere they are upcast to FP32 and `torch.cdist` is used; its
+matmul form loses about 1e-2 near zero distance, which is why the kernel exists. Peak VRAM for 100k images is about
+0.7 GiB on the Triton path and 1.1 GiB on the fallback.
 
-The "db" is a single SQLite file. Table `embeddings` has one row per image: `path` (relative to the image dir, primary key), `mtime` and `size` of the image when it was encoded, and `embedding`, the raw little-endian float16 vector as a BLOB. Table `meta` records `model_id`, `dim`, `dtype` and `schema_version`. FP16 is lossless here: CLIP models run in FP16 on CUDA, so every output value is already exactly representable.
+**Model.** The default is `hf-hub:timm/ViT-SO400M-16-SigLIP2-512`. `PE-Core-bigG-14-448` was the previous default
+and is noticeably more sensitive to compression artifacts: a JPEG q90 re-save of a picture lands 5 to 15 away from the
+original, overlapping with the distance between different pictures.
 
-On update, the stored mtimes are compared with the files on disk: images with a changed mtime or no row get (re)encoded, rows whose image no longer exists are deleted (`--clean-orphans`). Loading concatenates all BLOBs and reinterprets them as one `(N, D)` float16 array with no per-row parsing. Writes are committed per encoding batch, so an interrupted run keeps its progress.
+## Roadmap
 
-### Matching
-
-Matching is done in blocks of query rows against the (upper triangle of the) whole database, so it is a few hundred large kernel launches instead of one memory-bound pass per image. Block size is chosen so a distance block stays under 256MiB.
-
-* On CUDA with Triton available (it ships with PyTorch on Linux), the database lives on the GPU as FP16 and `l2_triton.py` computes exact L2 distances with FP32 arithmetic from the FP16 values, i.e. no `|a|^2+|b|^2-2ab` cancellation. Error vs. float64 is ~1e-5.
-* Otherwise (CPU, or CUDA without Triton) the database is upcast to FP32 and `torch.cdist` is used. Its matmul form loses ~1e-2 of absolute precision near zero distance for embeddings of norm ~16, which has not been observed to change any decision at the default threshold, but is why the Triton path exists.
-
-Peak VRAM for 100k images is about 0.7GiB on the Triton path and 1.1GiB on the `torch.cdist` path.
-
-
-## Roadmap:
-
-* [ ] Find more ways to save memory
-* [ ] Switch to more usable inference library to replace Open CLIP (it has almost no documentations, and gives a ton of linter error)
-* [ ] Train custom model to optimize for anime image comparison?
-* [ ] Clean-up?
-
-## Current Performance:
-
-Test platform:
-
-Python 3.12 on Arch Linux, AMD Ryzen 7 5700X3D + NVIDIA RTX4080
-
-Image encoding: about 15 image/s
-
-Dedupe: main.py: ~900 image/s for 60k images dataset
+* [ ] Store a mean-centered copy or normalized embeddings to make thresholds model-independent?
+* [ ] Train a custom model for anime image comparison? (`src/clip_training`)
