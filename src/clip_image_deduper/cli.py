@@ -12,7 +12,8 @@ import numpy as np
 import torch
 import tqdm
 
-from .db_store import ImageRecord, load_database
+from .db_store import EmbeddingDB, ImageRecord, load_database
+from .calibrate import VARIANTS, calibrate, default_variants, report
 from .dedupe import find_cross_duplicates, find_duplicate_groups, move_to_trash, trash_duplicate_groups
 from .encoder import CLIPImageEncoder, default_model_id, default_seq_len, precision_choices
 from .encoding_pipeline import update_database
@@ -258,6 +259,51 @@ def encode_test(model_id: str, device: str, compile_: bool, seq_len: int, dtype:
     click.echo(f"Feature matrix shape: {features.shape}")
     click.echo("Euclidean distance matrix:")
     click.echo(euclidean_distance(features, features))
+
+
+@cli.command("calibrate")
+@image_dir_arg
+@db_arg
+@model_options
+@update_options
+@click.option("--samples", "-s", type=int, default=200, show_default=True, help="Number of images to sample from the database.")
+@click.option("--seed", type=int, default=0, show_default=True, help="Sampling seed; the same seed on an unchanged directory picks the same images.")
+@click.option(
+    "--variants", default=",".join(default_variants), show_default=True,
+    help=f"Comma-separated lossy copies to synthesize per sample. Available: {', '.join(VARIANTS)}.",
+)
+@click.option("--threshold", "-t", "thresholds", type=float, multiple=True, help="Threshold(s) to evaluate against the distributions (default: the dedupe default).")
+def calibrate_cmd(
+    image_dir: str, db: str, model_id: str, device: str, compile_: bool, seq_len: int, batch_size: int, workers: int | None, force_update: bool,
+    clean_orphans: bool, skip_update: bool, samples: int, seed: int, variants: str, thresholds: tuple[float, ...],
+) -> None:
+    """Measure how far lossy copies and different images sit, and suggest a threshold.
+
+    Samples images from the database, synthesizes variants (JPEG re-save, downscale, ...) and prints histograms of
+    their distance to the stored embedding next to the distance to the nearest different image.
+    """
+    variant_names = [v.strip() for v in variants.split(",") if v.strip()]
+    unknown = [v for v in variant_names if v not in VARIANTS]
+    if unknown:
+        raise click.ClickException(f"Unknown variants {', '.join(unknown)}; available: {', '.join(VARIANTS)}")
+    with _encoder(model_id, device, compile_=compile_, seq_len=seq_len) as encoder:
+        if not skip_update:
+            _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
+        with EmbeddingDB(db) as store:
+            if store.model_id != encoder.model_id:
+                raise click.ClickException(f"Database {db} was encoded with model '{store.model_id}', but '{encoder.model_id}' is loaded.")
+        records, embeddings = load_database(db)
+        if not records:
+            raise click.ClickException(f"No entries in the database {db}. Run an update first.")
+        index = DistanceIndex(embeddings, device)
+        n = min(samples, len(records))
+        with _progress(n, "Calibrating") as progress:
+            result = calibrate(
+                encoder, image_dir, records, embeddings, index, samples=samples, seed=seed, variants=variant_names, batch_size=batch_size, progress=progress,
+            )
+        index.release()
+    for line in report(result, thresholds or (default_euclidean_distance_threshold,)):
+        click.echo(line)
 
 
 if __name__ == "__main__":

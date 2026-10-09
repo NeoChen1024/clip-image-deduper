@@ -60,12 +60,26 @@ clip-image-deduper update-db -i pictures -d pictures.sqlite
 clip-image-deduper encode-test a.jpg a_copy.png b.jpg
 ```
 
+Calibrate a threshold from the collection itself: sample images, synthesize lossy copies of them, and print
+histograms of how far the copies land from the stored embedding next to how far the nearest *different* image is:
+
+```shell
+clip-image-deduper calibrate -i pictures -d pictures.sqlite -s 200 --seed 0 --variants jpeg90,half,quarter
+```
+
 ### Options worth knowing
 
 * `-t, --threshold` (default `0.1`): Euclidean distance at or below which two images are duplicates. With the default
   model, bit-identical re-encodes are well under 0.1; a JPEG q90 re-save or a 50% downscale of the same picture lands
   around 0.2-0.5, a 25% downscale up to about 2.4, and different pictures at 5.5 and above. Raise the threshold if
-  you want lossy copies caught too; `encode-test` on a few known pairs is the quickest way to calibrate.
+  you want lossy copies caught too; `calibrate` measures these distributions on your own collection and model and
+  suggests a value, `encode-test` does the same for a handful of files by hand.
+* `calibrate` options: `-s, --samples` (default 200) images are drawn with `--seed` (default 0), so an unchanged
+  directory gives the same sample again (the draw is over sorted paths, independent of database row order; it is not
+  promised to survive version upgrades). `--variants` picks which lossy copies to synthesize (`jpeg90`, `jpeg75`,
+  `webp80`, `half`, `quarter`), `-t` may be repeated to see what several thresholds would catch. The suggestion is
+  the largest variant distance rounded up, provided it is below the nearest different image; the default 0.1 is
+  intentionally far below it and is not what this command recommends.
 * `-k, --keeping-logic` (default `largest`) and `--keeping-config`: see below.
 * `-n, --dry-run`: report what would be moved without moving. The database is still refreshed; add `--skip-update`
   for a run that writes nothing at all.
