@@ -141,14 +141,18 @@ The Apply dialog lists `keep → trash` per decided group, with totals (files, b
 paths in the `applied` table so an "Undo apply" can move them back as long as the trash directory is untouched. Groups whose files changed
 on disk since matching (mtime or missing) are refused and flagged; re-run `update-db` and Re-match.
 
-## Threshold and the calibrate output
+## Thresholds
 
-The review threshold defaults to the `calibrate` suggestion when the session is new and a calibration is stored in
-the database `meta` (to be added: `calibrate` writes its suggestion, variants and seed there), otherwise 0.5. The
-automatic threshold of the CLI (0.1) is shown as a marker in the group list: groups entirely below it are what
-`dedupe` would have merged on its own and are pre-decided with the policy's choice, so the reviewer only looks at
-the band between the two values. The thresholds are a spin box in the toolbar; changing them requires Re-match and
-keeps existing decisions whose membership did not change.
+The review threshold is the user's choice, made after looking at the `calibrate` histograms, and given once to
+`dedupe --review-threshold`; it is recorded in the review database's `meta` and shown by the GUI and
+`review-status`. The automatic threshold of the CLI (0.1 by default) is recorded alongside it: groups whose every
+pair is within it are what `dedupe` would have merged on its own, so they start pre-decided with the policy's
+choice, and the reviewer only looks at the band between the two values. Changing either value means re-running the
+match from the CLI; decisions of groups whose membership did not change survive that.
+
+`calibrate` deliberately does not feed the GUI: its suggestion only exists when the variant and different-image
+distributions do not overlap, and it answers "how loose to catch these synthetic variants", not "how loose is
+worth a human look", which may well be looser.
 
 ## Code layout and packaging
 
@@ -171,8 +175,6 @@ installed.
 
 ## Deviations from the plan
 
-* `calibrate` does not yet write its suggestion into the database, so the review threshold is always given on the
-  command line.
 * Apply runs synchronously with a progress dialog rather than in a job: moves are quick and must not interleave
   with decisions.
 * Ctrl+S is unbound (every decision commits immediately).
@@ -187,4 +189,4 @@ installed.
 3. Canvas: linked zoom/pan, flip, diff, full-resolution off-thread loading, LRU.
 4. Decisions: keep toggles, policy pre-selection, C/Enter/S/U, filters.
 5. Apply dialog with dry-run and undo-apply; file-changed guards.
-6. `calibrate` writes its suggestion to `meta`; the GUI uses it. Help dialog, README section.
+6. Help dialog, README section.
