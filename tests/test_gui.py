@@ -299,3 +299,29 @@ class CanvasTests(unittest.TestCase):
             self.assertAlmostEqual(view.transform().m11(), expected(view), places=4)
         self.assertEqual(canvas.zoom_state, "fit")
         canvas.close()
+
+    def test_diff_arriving_later_is_fitted(self):
+        """The diff is computed off-thread and swapped in after the group was shown; in fit mode that swap must
+        not bring back the scale of the previous picture."""
+        from clip_image_deduper.gui.jobs import qimage
+
+        canvas = CompareCanvas()
+        canvas.resize(400, 200)
+        canvas.show()
+        QApplication.processEvents()
+        small = qimage(PIL.Image.new("RGB", (100, 50)))
+        canvas.set_images(small, small)
+        canvas.set_mode("diff")
+        canvas.set_diff(small, small)
+        QApplication.processEvents()
+        first = canvas.scale_factor()
+        big = qimage(PIL.Image.new("RGB", (2000, 1000)))
+        canvas.set_images(big, big)  # next group: the diff is not there yet
+        canvas.set_diff(big, big)
+        QApplication.processEvents()
+        self.assertAlmostEqual(canvas.scale_factor(), first / 20, places=4)
+        canvas.zoom(2.0)  # a manual zoom is kept across the Space swap
+        zoomed = canvas.scale_factor()
+        canvas.set_flipped(True)
+        self.assertEqual(canvas.scale_factor(), zoomed)
+        canvas.close()

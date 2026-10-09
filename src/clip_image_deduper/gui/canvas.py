@@ -153,10 +153,15 @@ class CompareCanvas(QWidget):
         return (self.diff_plain if self.flipped else self.diff) if self.mode == "diff" else None
 
     def _show_keeping_view(self) -> None:
-        """Swap the single view's image without losing zoom or scroll position."""
+        """Swap the single view's image without losing zoom or scroll position.
+
+        In fit mode the swap fits the new image itself, and the saved transform must not be put back: in diff mode
+        it would be the one from before the diff was computed, i.e. the previous group's scale."""
         transform = self.left.transform()
         h, v = self.left.horizontalScrollBar().value(), self.left.verticalScrollBar().value()
         self.left.set_image(self._single_image())
+        if self.left.auto_fit:
+            return
         self.left.setTransform(transform)
         self.left.horizontalScrollBar().setValue(h)
         self.left.verticalScrollBar().setValue(v)

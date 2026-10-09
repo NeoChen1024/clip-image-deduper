@@ -40,6 +40,12 @@ class Job(QRunnable):
         super().__init__()
         self.function = function
         self.signals = Signals()
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        """Make the job a no-op if it has not started yet. (Qt deletes a runnable as soon as it has run, so taking
+        it back out of the pool is not safe to attempt once it may have started; a flag is.)"""
+        self.cancelled = True
 
     def connect(self, result: Callable[[object], object], error: Callable[[str], object]) -> Job:
         self.signals.result.connect(lambda r: (Job._alive.discard(self), result(r)), Qt.ConnectionType.QueuedConnection)
@@ -48,6 +54,9 @@ class Job(QRunnable):
         return self
 
     def run(self) -> None:
+        if self.cancelled:
+            Job._alive.discard(self)
+            return
         try:
             self.signals.result.emit(self.function(self.signals))
         except Exception as error:  # noqa: BLE001 - reported to the GUI

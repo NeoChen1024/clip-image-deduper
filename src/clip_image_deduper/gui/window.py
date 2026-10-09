@@ -302,8 +302,8 @@ class ReviewWindow(QMainWindow):
             wanted.extend(p for p in self._pair_of(self.groups_model.groups[r]) if p)
         current = {self.members[self.a].path, self.members[self.b].path} if self.members else set()
         for path, job in list(self.loading.items()):
-            if path not in wanted and path not in current and self.pool.tryTake(job):
-                Job._alive.discard(job)
+            if path not in wanted and path not in current:
+                job.cancel()  # a no-op if it already started; its result is then simply cached
                 del self.loading[path]
         for path in wanted:
             self._load_image(path, priority=0)
