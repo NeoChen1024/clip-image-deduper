@@ -37,9 +37,28 @@ Out (for now): editing images, cross-directory `dedupe-import` review, running t
 * `Decision`: per group, `keep: set[path]`, `status: "pending" | "decided" | "skipped"`, `note: str`, timestamp.
   Keyed by the sorted tuple of member paths, so a group is recognized again after the matcher re-runs, as long as
   its membership did not change; a changed group comes back as pending with the old decision shown as a hint.
-* `ReviewSession`: `<db>.review.jsonl` next to the database, append-only (last record per group wins), same idea as
-  the editor's `edits.jsonl`. Holds the review threshold, policy name and seed-free parameters so a session reopens
-  identically. Rewritten compactly on clean close.
+* `ReviewSession`: a **separate SQLite file**, `<db>.review.sqlite`, next to the embedding database. A review of a
+  100k-image library can hold tens of thousands of groups and hundreds of thousands of members and edges; that is
+  hundreds of times what the dataset editor's JSONL handles, and a JSONL would have to be fully parsed on open and
+  rewritten on close. SQLite gives indexed lookups, per-decision commits (WAL, `synchronous = NORMAL`, as in
+  `db_store.py`) and a file that survives `--force-update` rebuilding the embedding database. Tables:
+
+  ```
+  meta      key, value                       schema_version, review_threshold, auto_threshold, policy, model_id,
+                                             image_dir, created_at
+  groups    id, key, n, min_distance, max_distance, status, note, updated_at
+                                             key = sha256 of the sorted member paths; UNIQUE
+  members   group_id, path, keep, width, height, size, format, mtime, distance_to_winner
+                                             PRIMARY KEY (group_id, path); INDEX (path)
+  edges     group_id, path_a, path_b, distance
+  history   id, group_id, at, keep_json, status, note
+                                             append-only; undo pops the last row of a group
+  applied   path, trash_path, group_id, at   one row per moved file; "Undo apply" reads it back
+  ```
+
+  Re-matching upserts groups by `key`: an unchanged group keeps its row, decision and history; a group whose
+  membership changed gets a new key and the old row is marked `stale` (kept for reference, filtered out by default).
+  The `members.path` index is what makes "which group is this file in" and the file-changed guard cheap.
 * Thumbnails and full images are read from the image directory; nothing from the review is written there.
 
 Matching runs once at session start (or on "Re-match" after changing the threshold) on the GPU through the existing
@@ -106,7 +125,7 @@ as in the editor. Everything is also reachable from the toolbar / menu, and F1 l
 | F | focus the note field; Esc returns to the canvas |
 | Ctrl+wheel | zoom (both views); Space+drag or middle drag pans |
 | Home / End, 0 | fit to view / 100% |
-| Ctrl+S | flush the session file now (it is also flushed after every change, debounced 500 ms) |
+| Ctrl+S | no-op kept for muscle memory: every decision is committed to the review database as it is made |
 | Ctrl+Enter | Apply… (dry-run dialog listing every move, then confirm) |
 | F1 | help |
 
@@ -116,7 +135,7 @@ as in the editor. Everything is also reachable from the toolbar / menu, and F1 l
 
 The Apply dialog lists `keep → trash` per decided group, with totals (files, bytes), runs `move_to_trash` from
 `dedupe.py` for each loser in a background job with progress, and records `applied` in the session with the trash
-paths so an "Undo apply" can move them back as long as the trash directory is untouched. Groups whose files changed
+paths in the `applied` table so an "Undo apply" can move them back as long as the trash directory is untouched. Groups whose files changed
 on disk since matching (mtime or missing) are refused and flagged; re-run `update-db` and Re-match.
 
 ## Threshold and the calibrate output
@@ -131,7 +150,7 @@ keeps existing decisions whose membership did not change.
 ## Code layout and packaging
 
 ```
-src/clip_image_deduper/review.py          groups with edges, Decision, ReviewSession (no Qt)
+src/clip_image_deduper/review.py          groups with edges, Decision, ReviewSession on SQLite (no Qt)
 src/clip_image_deduper/gui/__init__.py
 src/clip_image_deduper/gui/app.py         main(), QApplication, CLI args (--db, --image-dir, --trash-dir, --threshold)
 src/clip_image_deduper/gui/window.py      QMainWindow, toolbar, event filter, key map, help text
@@ -149,8 +168,9 @@ installed.
 
 ## Milestones
 
-1. `review.py`: groups with edges, session file, decisions, undo. Tests. CLI gains `--review-threshold` on `dedupe`
-   that writes groups in the band to the session file instead of trashing them, so the GUI has something to open.
+1. `review.py`: groups with edges, the review SQLite schema, decisions, undo, re-match upsert by group key. Tests.
+   CLI gains `--review-threshold` on `dedupe` that writes groups in the band to the review database instead of
+   trashing them, so the GUI has something to open, and a `review-status` subcommand that prints the counters.
 2. Window skeleton: open DB + image dir, group list with badges, member panel, status bar, navigation keys, session
    persistence. Static side-by-side canvas.
 3. Canvas: linked zoom/pan, flip, diff, full-resolution off-thread loading, LRU.
