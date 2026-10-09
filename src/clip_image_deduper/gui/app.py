@@ -19,8 +19,11 @@ from ..review import default_review_path
 @click.option("--trash-dir", type=click.Path(file_okay=False), default=None, help="Where Apply moves the losers (asked for on first Apply otherwise).")
 @click.option("--keeping-logic", "-k", default=None, help="Keeping policy for the P key (default: the one recorded in the review database).")
 @click.option("--keeping-config", type=click.Path(exists=True, dir_okay=False), default=None, help="TOML file adding/overriding keeping policies.")
+@click.option("--prefetch", type=click.IntRange(0), default=2, show_default=True, help="Groups to load ahead in the direction you are moving (each keeps two full images in memory).")
 @click.option("--verbose", "-v", is_flag=True, help="Debug logging.")
-def main(db: str | None, review_db: str | None, image_dir: str | None, trash_dir: str | None, keeping_logic: str | None, keeping_config: str | None, verbose: bool) -> None:
+def main(
+    db: str | None, review_db: str | None, image_dir: str | None, trash_dir: str | None, keeping_logic: str | None, keeping_config: str | None, prefetch: int, verbose: bool
+) -> None:
     """Review duplicate groups found by `clip-image-deduper dedupe --review-threshold`."""
     setup_logging(verbose)
     path = review_db or (default_review_path(db) if db else None)
@@ -44,7 +47,7 @@ def main(db: str | None, review_db: str | None, image_dir: str | None, trash_dir
     from .window import ReviewWindow
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
-    window = ReviewWindow(path, image_dir=image_dir, trash_dir=trash_dir, policy=policy)
+    window = ReviewWindow(path, image_dir=image_dir, trash_dir=trash_dir, policy=policy, prefetch=prefetch)
     window.show()
     sys.exit(app.exec())
 

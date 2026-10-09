@@ -103,8 +103,10 @@ need incremental matching.
 
 Large images: thumbnails via `QImageReader.setScaledSize` (fast JPEG downscale on decode); the canvas decodes the
 full file off-thread with Pillow and the same leniency flags as the encoder (`MAX_IMAGE_PIXELS = None`, truncated
-files allowed), converts to `QImage` and keeps the last ~8 full images in an LRU. Thumbnail cache ~300 entries like
-the editor. Files that fail to load show a `[!]` and keep the group reviewable.
+files allowed), converts to `QImage` and keeps the full images in a small LRU. The window remembers the direction
+of the last navigation and prefetches the A/B pair of the next `--prefetch` groups (default 2) that way at low
+priority, so a steady Next/Next/Next never waits for the disk; turning around drops the queued prefetches that are
+now behind. Thumbnail cache ~300 entries like the editor. Files that fail to load show a `[!]` and keep the group reviewable.
 
 ## Key map
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 from collections.abc import Callable
@@ -50,7 +51,9 @@ FILTERS = ("all", "pending", "decided", "skipped", "applied", "stale")
 class ReviewWindow(QMainWindow):
     """One review database, one image directory."""
 
-    def __init__(self, review_path: str, image_dir: str | None = None, trash_dir: str | None = None, policy: Policy | None = None):
+    def __init__(
+        self, review_path: str, image_dir: str | None = None, trash_dir: str | None = None, policy: Policy | None = None, *, prefetch: int = 2
+    ):
         super().__init__()
         self.review = ReviewDB(review_path)
         self.image_dir = image_dir or self.review.get_meta("image_dir") or "."
@@ -64,10 +67,16 @@ class ReviewWindow(QMainWindow):
 
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(4)
-        self.images: LRU = LRU(8)  # path -> (PIL image, QImage)
+        self.prefetch_depth = prefetch
+        # Current pair, the previous one, and the prefetched pairs ahead (5000x3000 is ~100 MB per entry).
+        self.images: LRU = LRU(2 * (prefetch + 2))  # path -> (PIL image, QImage)
         self.thumbs: LRU = LRU(300)  # path -> QPixmap
         self.pending_loads: set[str] = set()
+        self.loading: dict[str, Job] = {}  # full images in flight or queued, by path
         self.generation = 0
+        self.direction = 1  # last navigation direction, prefetch goes this way
+        self.pending_only = False
+        self.shown: tuple[str, str | None] | None = None
 
         self.current: GroupRow | None = None
         self.members: list[MemberRow] = []
@@ -227,6 +236,7 @@ class ReviewWindow(QMainWindow):
         if n == 0:
             return
         row = self.group_list.currentIndex().row()
+        self.direction, self.pending_only = (1 if delta > 0 else -1), pending_only
         if pending_only:
             candidates = range(row + 1, n) if delta > 0 else range(row - 1, -1, -1)
             for r in candidates:
@@ -242,6 +252,8 @@ class ReviewWindow(QMainWindow):
         if not index.isValid():
             return
         group = index.data(GROUP_ROLE)
+        if previous.isValid() and previous.row() != index.row():
+            self.direction = 1 if index.row() > previous.row() else -1
         self.position_label.setText(f"Group {index.row() + 1:,} / {self.groups_model.rowCount():,}")
         self.show_group(group)
 
@@ -261,6 +273,53 @@ class ReviewWindow(QMainWindow):
         self.edges_label.setText("  ".join(f"{names.get(a, '?')}–{names.get(b, '?')}: {d:.3f}" for a, b, d in edges[:30]) + ("  …" if len(edges) > 30 else ""))
         self._refresh_group_label()
         self._request_images()
+        self._prefetch()
+
+    def _pair_of(self, group: GroupRow) -> tuple[str, str | None]:
+        """The A/B paths :meth:`show_group` would pick for ``group``, without touching the window state."""
+        members = self.review.members(group.id)
+        if not members:
+            return "", None
+        keeps = [i for i, m in enumerate(members) if m.keep]
+        a = keeps[0] if keeps else 0
+        saved = self.members
+        self.members = members
+        try:
+            b = self._nearest(a, self.review.edges(group.id))
+        finally:
+            self.members = saved
+        return members[a].path, members[b].path if b != a else None
+
+    def _prefetch(self) -> None:
+        """Queue the full images of the next groups in the direction of travel, at low priority, and drop queued
+        prefetches that are no longer ahead (the user turned around)."""
+        row = self.group_list.currentIndex().row()
+        rows = range(row + 1, self.groups_model.rowCount()) if self.direction > 0 else range(row - 1, -1, -1)
+        if self.pending_only:
+            rows = (r for r in rows if self.groups_model.groups[r].status == "pending")  # type: ignore[assignment]
+        wanted: list[str] = []
+        for r in itertools.islice(rows, self.prefetch_depth):
+            wanted.extend(p for p in self._pair_of(self.groups_model.groups[r]) if p)
+        current = {self.members[self.a].path, self.members[self.b].path} if self.members else set()
+        for path, job in list(self.loading.items()):
+            if path not in wanted and path not in current and self.pool.tryTake(job):
+                Job._alive.discard(job)
+                del self.loading[path]
+        for path in wanted:
+            self._load_image(path, priority=0)
+
+    def _load_image(self, path: str, *, priority: int) -> None:
+        if path in self.images or path in self.loading:
+            return
+        full = os.path.join(self.image_dir, path)
+
+        def read(signals):
+            im = load_image(full)
+            return path, im, qimage(im)
+
+        job = Job(read).connect(self._image_loaded, lambda error: self._image_failed(path, error))
+        self.loading[path] = job
+        self.pool.start(job, priority)
 
     def _nearest(self, i: int, edges: list[tuple[str, str, float]]) -> int:
         """The member closest to member ``i`` by the stored edges (edges are sorted by distance), else another one."""
@@ -381,44 +440,40 @@ class ReviewWindow(QMainWindow):
     def _request_images(self) -> None:
         """Load A and B (cached or off-thread) and show them when both are in."""
         self.generation += 1
-        generation = self.generation
+        self.shown = None
         if not self.members:
             self.canvas.clear()
             return
-        paths = [self.members[self.a].path, self.members[self.b].path if self.b != self.a else None]
-        for path in paths:
-            if path is None or path in self.images:
-                continue
-            full = os.path.join(self.image_dir, path)
+        for path in (self.members[self.a].path, self.members[self.b].path if self.b != self.a else None):
+            if path is not None:
+                self._load_image(path, priority=1)  # ahead of any prefetch
+        self._show_images()
 
-            def read(signals, p=path, f=full):
-                im = load_image(f)
-                return p, im, qimage(im)
-
-            self.pool.start(
-                Job(read).connect(lambda result, g=generation: self._image_loaded(result, g), lambda error, p=path, g=generation: self._image_failed(p, error, g))
-            )
-        self._show_images(generation)
-
-    def _image_loaded(self, result, generation: int) -> None:
+    def _image_loaded(self, result) -> None:
         path, im, image = result
+        self.loading.pop(path, None)
         self.images.put(path, (im, image))
-        self._show_images(generation)
+        self._show_images()
 
-    def _image_failed(self, path: str, error: str, generation: int) -> None:
+    def _image_failed(self, path: str, error: str) -> None:
+        self.loading.pop(path, None)
         self.images.put(path, (None, QImage()))
         self.message(f"Cannot read {path}: {error}")
-        self._show_images(generation)
+        self._show_images()
 
-    def _show_images(self, generation: int) -> None:
-        if generation != self.generation or not self.members:
+    def _show_images(self) -> None:
+        """Show the current pair once both images are cached; a no-op until then and once it is on screen."""
+        if not self.members:
             return
         pa = self.members[self.a].path
         pb = self.members[self.b].path if self.b != self.a else None
+        if self.shown == (pa, pb):
+            return
         ca = self.images.get(pa)
         cb = self.images.get(pb) if pb else (None, None)
         if ca is None or (pb and cb is None):
             return  # still loading
+        self.shown = (pa, pb)
         self.canvas.set_images(ca[1], cb[1] if cb else None)
         if self.canvas.mode == "diff":
             self._request_diff()

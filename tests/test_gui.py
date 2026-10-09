@@ -200,6 +200,20 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.win.zoom_actions["actual"].isChecked())
         self.assertEqual(self.win.canvas.zoom_state, "actual")
 
+    def test_prefetches_in_the_direction_of_travel(self):
+        # Startup shows group 1 (c/d) and the default direction is forward: group 2 (a/b) is loaded ahead of time.
+        self.assertIn("c.png", self.win.images)
+        self.assertIn("a.png", self.win.images)
+        self.assertIn("sub/b.png", self.win.images)
+        self.assertEqual(self.win.loading, {})
+        self.win.images.clear()
+        self.key(Qt.Key.Key_X)  # now on the last group, moving forward: nothing ahead to prefetch
+        self.assertEqual(sorted(self.win.images._d), ["a.png", "sub/b.png"])
+        self.key(Qt.Key.Key_Z)  # turned around: the group behind (none, we are first) and the current one only
+        self.assertEqual(self.win.direction, -1)
+        self.assertIn("c.png", self.win.images)
+        self.assertEqual(self.win.canvas.left.image_size, (40, 40))
+
     def test_filter(self):
         self.win.filter.setCurrentText("pending")
         self.win.wait_idle()
