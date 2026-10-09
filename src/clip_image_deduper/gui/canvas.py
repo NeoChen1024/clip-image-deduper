@@ -102,8 +102,8 @@ class CompareCanvas(QWidget):
             view.wheel.connect(self._wheel)
             view.space_changed.connect(self._space)
         for a, b in ((self.left, self.right), (self.right, self.left)):
-            a.horizontalScrollBar().valueChanged.connect(lambda v, other=b: self._sync_scroll(other, "h", v))
-            a.verticalScrollBar().valueChanged.connect(lambda v, other=b: self._sync_scroll(other, "v", v))
+            a.horizontalScrollBar().valueChanged.connect(lambda v, src=a, other=b: self._sync_scroll(src, other, "h", v))
+            a.verticalScrollBar().valueChanged.connect(lambda v, src=a, other=b: self._sync_scroll(src, other, "v", v))
 
     # -- content ---------------------------------------------------------------------------------------------------
 
@@ -178,20 +178,11 @@ class CompareCanvas(QWidget):
         return [v for v in views if v.image_size != (0, 0)]
 
     def fit(self) -> None:
-        """Fit the visible view(s); in side-by-side mode both get the smaller scale so the pictures line up.
-
-        Hidden views are ignored: their viewport is stale and would drag the shared scale down to a thumbnail.
-        """
+        """Fit each visible view to its own image. The two pictures may have very different resolutions, so they
+        get different scales; zooming keeps multiplying both, and scrolling is linked proportionally."""
         self._auto_fit = True
-        views = self._active_views()
-        if not views:
-            return
-        for view in views:
+        for view in self._active_views():
             view.fitInView(view.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-        scale = min(v.transform().m11() for v in views)
-        for view in (self.left, self.right):
-            view.resetTransform()
-            view.scale(scale, scale)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
@@ -225,12 +216,18 @@ class CompareCanvas(QWidget):
         for view in (self.left, self.right):
             view.setDragMode(mode)
 
-    def _sync_scroll(self, other: ImageView, axis: str, value: int) -> None:
+    def _sync_scroll(self, source: ImageView, other: ImageView, axis: str, value: int) -> None:
+        """Keep the two views at the same relative position: scales differ, so map by fraction of the range."""
         if self._syncing or self.mode != "side":
             return
+        src = source.horizontalScrollBar() if axis == "h" else source.verticalScrollBar()
+        dst = other.horizontalScrollBar() if axis == "h" else other.verticalScrollBar()
+        span = src.maximum() - src.minimum()
+        if span <= 0 or dst.maximum() - dst.minimum() <= 0:
+            return
+        fraction = (value - src.minimum()) / span
         self._syncing = True
         try:
-            bar = other.horizontalScrollBar() if axis == "h" else other.verticalScrollBar()
-            bar.setValue(value)
+            dst.setValue(round(dst.minimum() + fraction * (dst.maximum() - dst.minimum())))
         finally:
             self._syncing = False

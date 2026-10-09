@@ -197,15 +197,19 @@ class CanvasTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_zoom_applies_to_both_views(self):
+    def test_each_view_fits_its_own_image_and_zoom_multiplies_both(self):
         from clip_image_deduper.gui.jobs import qimage
 
         canvas = CompareCanvas()
         canvas.resize(400, 200)
         canvas.show()
-        canvas.set_images(qimage(PIL.Image.new("RGB", (100, 50))), qimage(PIL.Image.new("RGB", (50, 50))))
+        QApplication.processEvents()
+        canvas.set_images(qimage(PIL.Image.new("RGB", (1000, 500))), qimage(PIL.Image.new("RGB", (50, 50))))
+        left, right = canvas.left.transform().m11(), canvas.right.transform().m11()
+        self.assertGreater(right, left * 5)  # the small image is not shrunk to the big one's scale
         canvas.zoom(2.0)
-        self.assertAlmostEqual(canvas.left.transform().m11(), canvas.right.transform().m11())
+        self.assertAlmostEqual(canvas.left.transform().m11(), left * 2)
+        self.assertAlmostEqual(canvas.right.transform().m11(), right * 2)
         canvas.actual_size()
         self.assertEqual(canvas.scale_factor(), 1.0)
         canvas.close()
@@ -223,6 +227,11 @@ class CanvasTests(unittest.TestCase):
         QApplication.processEvents()
         canvas.fit()
         self.assertGreater(canvas.scale_factor(), side * 1.5)  # one view has the whole width now
+        canvas.set_mode("side")
+        QApplication.processEvents()
+        canvas.zoom(4.0)
+        canvas.left.horizontalScrollBar().setValue(canvas.left.horizontalScrollBar().maximum())
+        self.assertEqual(canvas.right.horizontalScrollBar().value(), canvas.right.horizontalScrollBar().maximum())  # linked by fraction
         canvas.zoom(1.5)
         canvas.resize(500, 300)
         QApplication.processEvents()
