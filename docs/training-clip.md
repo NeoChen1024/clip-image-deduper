@@ -21,9 +21,9 @@ sensitive to the details tags do not describe). So:
 2. **Search route** (both towers). Image-text alignment on tags and captions for anime semantic search. Everything in
    the "Dataset" section below is about this route.
 
-Both can start from the same SigLIP2 so400m checkpoint. If the search route is to keep the dedupe route's tower, the
-dedupe fine-tune must stay close to the original weights (low learning rate, or WiSE-FT interpolation with the
-original), otherwise the text tower's alignment is lost.
+The two routes produce two independent models. Both start from the same SigLIP2 so400m checkpoint, but neither
+fine-tune has to preserve the other's behaviour: the dedupe tower is free to drift from the text alignment, and the
+search model is free to lose the detail sensitivity the deduper needs.
 
 ## Model and precision
 
@@ -44,9 +44,10 @@ original), otherwise the text tower's alignment is lost.
 * Loss: SigLIP's sigmoid loss, which only looks at pairs and tolerates small batches far better than the softmax
   CLIP loss (which needs hundreds to thousands of negatives per step). If batches must still grow beyond what fits,
   use gradient caching (GradCache) rather than smaller precision.
-* Forgetting: low learning rate with warm-up, or LoRA, and compare against the original with WiSE-FT interpolation
-  (`w = (1-a)·w_orig + a·w_ft`) before deciding a fine-tune is an improvement. Evaluate zero-shot retrieval on a
-  held-out set at every checkpoint, not just the training loss.
+* Forgetting (search route): low learning rate with warm-up, or LoRA, and compare against the original with WiSE-FT
+  interpolation (`w = (1-a)·w_orig + a·w_ft`) before deciding a fine-tune is an improvement. Evaluate zero-shot
+  retrieval on a held-out set at every checkpoint, not just the training loss. The dedupe route has no alignment to
+  keep; its only metric is the variant/different gap on held-out groups.
 * Framework: train with `transformers` (`Siglip2Model`, `attn_implementation="sdpa"` or flash-attention 2,
   gradient checkpointing built in), then convert the image tower to timm's `naflexvit_*` layout for the deduper.
   timm's checkpoints were themselves converted from the Google release, so the mapping exists; the conversion
