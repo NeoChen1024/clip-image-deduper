@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView, QHBoxLayout, QWidget
 
@@ -25,6 +25,7 @@ class ImageView(QGraphicsView):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.pix = self.scene().addPixmap(QPixmap())
         self.image_size = (0, 0)
+        self.auto_fit = False
 
     def set_image(self, image: QImage | None) -> None:
         if image is None or image.isNull():
@@ -35,6 +36,32 @@ class ImageView(QGraphicsView):
         self.pix.setPixmap(QPixmap.fromImage(image))
         self.image_size = (image.width(), image.height())
         self.scene().setSceneRect(0, 0, image.width(), image.height())
+        if self.auto_fit:
+            self.fit()
+
+    def fit(self) -> None:
+        """Scale the image to the viewport and keep doing so whenever the viewport changes size.
+
+        The canvas asks for a fit while the layout is still stale (a view just shown, the splitter just moved,
+        the window not yet maximised), so the one-shot ``fitInView`` was often computed against the wrong size.
+        Fitting again from ``resizeEvent`` means the last fit always sees the final viewport. The size used is the
+        one without scrollbars, so a fit after 100% does not shrink to make room for bars that then disappear.
+        """
+        self.auto_fit = True
+        iw, ih = self.image_size
+        size = self.maximumViewportSize()
+        vw, vh = size.width() - 2, size.height() - 2  # the margin Qt's fitInView uses, against rounding into scrollbars
+        if not iw or not ih or vw <= 0 or vh <= 0:
+            return
+        scale = min(vw / iw, vh / ih)
+        self.resetTransform()
+        self.scale(scale, scale)
+        self.centerOn(self.sceneRect().center())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.auto_fit:
+            self.fit()
 
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
         self.wheel.emit(event)
@@ -114,13 +141,6 @@ class CompareCanvas(QWidget):
         self._show()
         if fit:
             self.fit()
-            # Scrollbars left over from the previous picture shrink the viewport while fitting; fit again once Qt
-            # has laid the new scene out.
-            QTimer.singleShot(0, self._refit_if_auto)
-
-    def _refit_if_auto(self) -> None:
-        if self._auto_fit:
-            self.fit()
 
     def set_diff(self, diff: QImage | None, plain: QImage | None = None) -> None:
         self.diff, self.diff_plain = diff, plain
@@ -182,16 +202,13 @@ class CompareCanvas(QWidget):
 
     # -- zoom / pan ------------------------------------------------------------------------------------------------
 
-    def _active_views(self) -> list[ImageView]:
-        views = [self.left] if self.mode != "side" else [self.left, self.right]
-        return [v for v in views if v.image_size != (0, 0)]
-
     def fit(self) -> None:
         """Fit each visible view to its own image. The two pictures may have very different resolutions, so they
-        get different scales; zooming keeps multiplying both, and scrolling is linked proportionally."""
+        get different scales; zooming keeps multiplying both, and scrolling is linked proportionally. Each view
+        keeps refitting itself as its viewport changes until the zoom is changed by hand."""
         self._set_zoom_state("fit")
-        for view in self._active_views():
-            view.fitInView(view.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        for view in (self.left, self.right):
+            view.fit()
 
     def _set_zoom_state(self, state: str) -> None:
         self._auto_fit = state == "fit"
@@ -199,19 +216,16 @@ class CompareCanvas(QWidget):
             self.zoom_state = state
             self.zoom_changed.emit(state)
 
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        super().resizeEvent(event)
-        if self._auto_fit:
-            self.fit()
-
     def actual_size(self) -> None:
         self._set_zoom_state("actual")
         for view in (self.left, self.right):
+            view.auto_fit = False
             view.resetTransform()
 
     def zoom(self, factor: float) -> None:
         self._set_zoom_state("free")
         for view in (self.left, self.right):
+            view.auto_fit = False
             view.scale(factor, factor)
 
     def scale_factor(self) -> float:

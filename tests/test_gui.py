@@ -253,3 +253,35 @@ class CanvasTests(unittest.TestCase):
         QApplication.processEvents()
         self.assertFalse(canvas._auto_fit)  # a manual zoom survives resizes
         canvas.close()
+
+    def test_fit_follows_the_final_viewport(self):
+        """A fit asked for before the layout has settled (mode switch, resize, 100% with scrollbars) must end up
+        matching the viewport the view actually gets, not the stale one it had at the time."""
+        from clip_image_deduper.gui.jobs import qimage
+
+        def expected(view):
+            size = view.maximumViewportSize()
+            return min((size.width() - 2) / view.image_size[0], (size.height() - 2) / view.image_size[1])
+
+        canvas = CompareCanvas()
+        canvas.resize(400, 200)
+        canvas.show()
+        QApplication.processEvents()
+        canvas.set_images(qimage(PIL.Image.new("RGB", (1000, 500))), qimage(PIL.Image.new("RGB", (300, 300))))
+        canvas.set_mode("flip")  # fit happens while the left view is still half width
+        QApplication.processEvents()
+        self.assertAlmostEqual(canvas.left.transform().m11(), expected(canvas.left), places=4)
+        canvas.set_mode("side")
+        QApplication.processEvents()
+        canvas.actual_size()  # scrollbars appear
+        QApplication.processEvents()
+        canvas.fit()  # a one-shot fit against the scrollbar-shrunk viewport would be too small
+        QApplication.processEvents()
+        for view in (canvas.left, canvas.right):
+            self.assertAlmostEqual(view.transform().m11(), expected(view), places=4)
+        canvas.resize(600, 350)
+        QApplication.processEvents()
+        for view in (canvas.left, canvas.right):
+            self.assertAlmostEqual(view.transform().m11(), expected(view), places=4)
+        self.assertEqual(canvas.zoom_state, "fit")
+        canvas.close()
