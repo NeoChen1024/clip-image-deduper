@@ -72,13 +72,16 @@ def thumbnail(path: str, size: tuple[int, int]) -> QImage:
     return qimage(im)
 
 
-def diff_image(a: PIL.Image.Image, b: PIL.Image.Image, gain: int = 4) -> QImage:
-    """Absolute difference of ``a`` and ``b`` (``b`` resampled to ``a``'s size), amplified ``gain`` times."""
+def diff_images(a: PIL.Image.Image, b: PIL.Image.Image, gain: int = 4) -> tuple[QImage, QImage]:
+    """``(overlay, plain)``: the absolute difference of ``a`` and ``b`` (``b`` resampled to ``a``'s size), amplified
+    ``gain`` times, once drawn over ``a`` at half brightness so the differences can be located, once on black."""
     if b.size != a.size:
         b = b.resize(a.size, PIL.Image.Resampling.LANCZOS)
-    arr = np.abs(np.asarray(a, dtype=np.int16) - np.asarray(b, dtype=np.int16)) * gain
-    out = PIL.Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB")
-    return qimage(out)
+    arr_a = np.asarray(a, dtype=np.int16)
+    diff = np.abs(arr_a - np.asarray(b, dtype=np.int16)) * gain
+    plain = PIL.Image.fromarray(np.clip(diff, 0, 255).astype(np.uint8), "RGB")
+    overlay = PIL.Image.fromarray(np.clip(arr_a // 2 + diff, 0, 255).astype(np.uint8), "RGB")
+    return qimage(overlay), qimage(plain)
 
 
 class LRU:
@@ -107,4 +110,4 @@ class LRU:
         self._d.clear()
 
 
-__all__ = ["Job", "Signals", "LRU", "load_image", "qimage", "thumbnail", "diff_image", "QPixmap"]
+__all__ = ["Job", "Signals", "LRU", "load_image", "qimage", "thumbnail", "diff_images", "QPixmap"]

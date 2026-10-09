@@ -73,8 +73,9 @@ class ImageView(QGraphicsView):
 class CompareCanvas(QWidget):
     """Two linked :class:`ImageView`s.
 
-    ``side``: A left, B right. ``flip``: one view showing A, or B while ``flipped`` is held. ``diff``: one view
-    showing the amplified absolute difference (supplied by the window, computed off-thread).
+    ``side``: A left, B right. ``flip``: one view showing A, or B while ``flipped`` (Space) is held. ``diff``: one
+    view showing the amplified absolute difference over A at half brightness, or on black while ``flipped`` is held
+    (both supplied by the window, computed off-thread).
     """
 
     navigate = Signal(int)  # +1 / -1 from the wheel
@@ -94,6 +95,7 @@ class CompareCanvas(QWidget):
         self.a: QImage | None = None
         self.b: QImage | None = None
         self.diff: QImage | None = None
+        self.diff_plain: QImage | None = None
         self._syncing = False
         for view in (self.left, self.right):
             view.wheel.connect(self._wheel)
@@ -105,15 +107,29 @@ class CompareCanvas(QWidget):
     # -- content ---------------------------------------------------------------------------------------------------
 
     def set_images(self, a: QImage | None, b: QImage | None, *, fit: bool = True) -> None:
-        self.a, self.b, self.diff = a, b, None
+        self.a, self.b, self.diff, self.diff_plain = a, b, None, None
         self._show()
         if fit:
             self.fit()
 
-    def set_diff(self, diff: QImage | None) -> None:
-        self.diff = diff
+    def set_diff(self, diff: QImage | None, plain: QImage | None = None) -> None:
+        self.diff, self.diff_plain = diff, plain
         if self.mode == "diff":
-            self._show()
+            self._show_keeping_view()
+
+    def _single_image(self) -> QImage | None:
+        if self.mode == "flip":
+            return self.b if self.flipped else self.a
+        return (self.diff_plain if self.flipped else self.diff) if self.mode == "diff" else None
+
+    def _show_keeping_view(self) -> None:
+        """Swap the single view's image without losing zoom or scroll position."""
+        transform = self.left.transform()
+        h, v = self.left.horizontalScrollBar().value(), self.left.verticalScrollBar().value()
+        self.left.set_image(self._single_image())
+        self.left.setTransform(transform)
+        self.left.horizontalScrollBar().setValue(h)
+        self.left.verticalScrollBar().setValue(v)
 
     def clear(self) -> None:
         self.set_images(None, None)
@@ -123,12 +139,9 @@ class CompareCanvas(QWidget):
             self.right.show()
             self.left.set_image(self.a)
             self.right.set_image(self.b)
-        elif self.mode == "flip":
-            self.right.hide()
-            self.left.set_image(self.b if self.flipped else self.a)
         else:
             self.right.hide()
-            self.left.set_image(self.diff)
+            self.left.set_image(self._single_image())
 
     # -- modes -----------------------------------------------------------------------------------------------------
 
@@ -152,13 +165,8 @@ class CompareCanvas(QWidget):
         if flipped == self.flipped:
             return
         self.flipped = flipped
-        if self.mode == "flip":
-            transform = self.left.transform()
-            h, v = self.left.horizontalScrollBar().value(), self.left.verticalScrollBar().value()
-            self.left.set_image(self.b if flipped else self.a)
-            self.left.setTransform(transform)
-            self.left.horizontalScrollBar().setValue(h)
-            self.left.verticalScrollBar().setValue(v)
+        if self.mode in ("flip", "diff"):
+            self._show_keeping_view()
 
     # -- zoom / pan ------------------------------------------------------------------------------------------------
 

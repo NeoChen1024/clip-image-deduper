@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 from ..keeping import Policy, load_policies
 from ..review import GroupRow, MemberRow, ReviewDB, apply_decisions, unapply_group
 from .canvas import CompareCanvas
-from .jobs import LRU, Job, diff_image, load_image, qimage, thumbnail
+from .jobs import LRU, Job, diff_images, load_image, qimage, thumbnail
 from .models import GROUP_ROLE, STATUS_BADGES, BadgeDelegate, GroupListModel
 
 logger = logging.getLogger(__name__)
@@ -273,13 +273,26 @@ class ReviewWindow(QMainWindow):
 
     # -- members -------------------------------------------------------------------------------------------------------
 
+    def _member_text(self, i: int) -> str:
+        m = self.members[i]
+        tag = "A" if i == self.a else "B" if i == self.b else " "
+        dist = "" if m.distance_to_winner is None else f" · d={m.distance_to_winner:.3f}"
+        return f"{i + 1} [{tag}] {m.path}\n{m.width}×{m.height} · {m.format} · {humanize.naturalsize(m.size, binary=True)}{dist}"
+
+    def _refresh_members(self) -> None:
+        """Update labels and check boxes in place (never rebuild the list from inside one of its own signals)."""
+        self.member_list.blockSignals(True)
+        for i in range(min(self.member_list.count(), len(self.members))):
+            item = self.member_list.item(i)
+            item.setText(self._member_text(i))
+            item.setCheckState(Qt.CheckState.Checked if self.members[i].keep else Qt.CheckState.Unchecked)
+        self.member_list.blockSignals(False)
+
     def _show_members(self) -> None:
         self.member_list.blockSignals(True)
         self.member_list.clear()
         for i, m in enumerate(self.members):
-            tag = "A" if i == self.a else "B" if i == self.b else " "
-            dist = "" if m.distance_to_winner is None else f" · d={m.distance_to_winner:.3f}"
-            item = QListWidgetItem(f"{i + 1} [{tag}] {m.path}\n{m.width}×{m.height} · {m.format} · {humanize.naturalsize(m.size, binary=True)}{dist}")
+            item = QListWidgetItem(self._member_text(i))
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if m.keep else Qt.CheckState.Unchecked)
             item.setData(Qt.ItemDataRole.UserRole, i)
@@ -300,7 +313,9 @@ class ReviewWindow(QMainWindow):
         keep = item.checkState() == Qt.CheckState.Checked
         self._decide(keeps={self.members[i].path: keep})
 
-    def _member_clicked(self, item: QListWidgetItem) -> None:
+    def _member_clicked(self, item: QListWidgetItem | None) -> None:
+        if item is None:
+            return
         i = item.data(Qt.ItemDataRole.UserRole)
         if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             self.set_b(i)
@@ -312,7 +327,7 @@ class ReviewWindow(QMainWindow):
             if i == self.b:
                 self.b = self.a
             self.a = i
-            self._show_members()
+            self._refresh_members()
             self._request_images()
 
     def set_b(self, i: int) -> None:
@@ -320,7 +335,7 @@ class ReviewWindow(QMainWindow):
             if i == self.a:
                 self.a = self.b
             self.b = i
-            self._show_members()
+            self._refresh_members()
             self._request_images()
 
     # -- images --------------------------------------------------------------------------------------------------------
@@ -412,13 +427,13 @@ class ReviewWindow(QMainWindow):
         a_im, b_im = ca[0], cb[0]
 
         def compute(signals):
-            return diff_image(a_im, b_im)
+            return diff_images(a_im, b_im)
 
-        self.pool.start(Job(compute).connect(lambda image, g=generation, k=(pa, pb): self._diff_ready(image, g, k), lambda error: self.message(f"Diff failed: {error}")))
+        self.pool.start(Job(compute).connect(lambda images, g=generation, k=(pa, pb): self._diff_ready(images, g, k), lambda error: self.message(f"Diff failed: {error}")))
 
-    def _diff_ready(self, image: QImage, generation: int, key) -> None:
+    def _diff_ready(self, images, generation: int, key) -> None:
         if generation == self.generation and self.diff_key == key:
-            self.canvas.set_diff(image)
+            self.canvas.set_diff(*images)
 
     def _mode_changed(self, mode: str) -> None:
         self.mode_actions[mode].setChecked(True)
@@ -449,7 +464,7 @@ class ReviewWindow(QMainWindow):
         self.current = group
         self.members = self.review.members(group.id)
         self.groups_model.update_group(group)
-        self._show_members()
+        self._refresh_members()
         self._refresh_group_label()
         self._update_counts()
         self.note.blockSignals(True)
@@ -696,7 +711,7 @@ HELP_HTML = """
 <h3>Canvas</h3>
 <table cellspacing="6">
 <tr><td><b>D</b></td><td>Cycle side by side → flip → diff</td></tr>
-<tr><td><b>Space</b> (hold)</td><td>In flip mode show B instead of A</td></tr>
+<tr><td><b>Space</b> (hold)</td><td>Flip mode: show B instead of A. Diff mode: hide the dimmed original, differences on black</td></tr>
 <tr><td><b>Ctrl+wheel</b></td><td>Zoom both views</td></tr>
 <tr><td><b>Space+drag</b>, middle drag</td><td>Pan</td></tr>
 <tr><td><b>Home / 0</b></td><td>Fit / 100%</td></tr>

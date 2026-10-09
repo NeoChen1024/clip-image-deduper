@@ -125,6 +125,13 @@ class GuiTests(unittest.TestCase):
         self.win.wait_idle()
         self.assertEqual(self.win.canvas.left.image_size, (40, 30))
         self.assertFalse(self.win.canvas.right.isVisible())
+        overlay = self.win.canvas.left.pix.pixmap().toImage()
+        self.assertGreater(overlay.pixelColor(0, 0).red(), 100)  # the dimmed red original shows through
+        QTest.keyPress(self.win.canvas.left, Qt.Key.Key_Space)
+        plain = self.win.canvas.left.pix.pixmap().toImage()
+        self.assertLess(plain.pixelColor(0, 0).red(), 60)  # on black only the amplified difference (5 * 4) remains
+        QTest.keyRelease(self.win.canvas.left, Qt.Key.Key_Space)
+        self.assertGreater(self.win.canvas.left.pix.pixmap().toImage().pixelColor(0, 0).red(), 100)
         self.key(Qt.Key.Key_D)
         self.assertEqual(self.win.canvas.mode, "side")
 
@@ -166,6 +173,16 @@ class GuiTests(unittest.TestCase):
         self.assertEqual([m.path for m in self.win.members], ["a.png", "c.png", "sub/b.png"])
         self.assertEqual(self.win.members[self.win.a].path, "c.png")  # largest pixel count... size: a.png 40x30 png vs c 40x40
         self.assertEqual(self.win.members[self.win.b].path, "sub/b.png")  # nearest to c.png (0.2), not member 1
+
+    def test_checkbox_click_does_not_rebuild_list(self):
+        self.key(Qt.Key.Key_X)
+        item = self.win.member_list.item(1)
+        item.setCheckState(Qt.CheckState.Checked)  # emits itemChanged like a click on the box
+        self.win._member_clicked(item)  # the click that follows must still find the same item
+        self.win._member_clicked(None)  # and a stray click on no item must not raise
+        self.assertIs(self.win.member_list.item(1), item)
+        with ReviewDB(self.review_path) as db:
+            self.assertEqual({m.path: m.keep for m in db.members(self.win.current.id)}, {"a.png": True, "sub/b.png": True})
 
     def test_filter(self):
         self.win.filter.setCurrentText("pending")

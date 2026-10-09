@@ -390,7 +390,7 @@ class ReviewDB:
             members = self.members(gid)
             keep = tuple(m.path for m in members if m.keep)
             if not keep:
-                logger.warning("Group %d keeps nothing; refusing to move all of its files", gid)
+                logger.debug("Group %d keeps nothing; refusing to move all of its files", gid)
                 continue
             moves.extend(Move(gid, m.path, keep) for m in members if not m.keep)
         return moves
