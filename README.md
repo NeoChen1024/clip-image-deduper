@@ -172,6 +172,9 @@ JPEG q90 re-save of a picture lands 5 to 15 away from the original, overlapping 
 
 ## Roadmap
 
-* [ ] Store a mean-centered copy or normalized embeddings to make thresholds model-independent?
+* [ ] Store a mean-centered copy or normalized embeddings to make thresholds model-independent? (`calibrate` now
+  measures the scale per model instead.)
+* [ ] PySide6 review GUI for the band between the automatic and a looser threshold: plan in
+  [docs/gui-review.md](docs/gui-review.md).
 * [ ] Train a custom model for anime image comparison, and later anime semantic search? Notes in
   [docs/training-clip.md](docs/training-clip.md), scripts under `src/clip_training`.
