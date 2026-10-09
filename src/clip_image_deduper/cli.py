@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import logging
 from collections.abc import Callable, Generator
 
@@ -14,11 +15,12 @@ import tqdm
 
 from .db_store import EmbeddingDB, ImageRecord, load_database
 from .calibrate import VARIANTS, calibrate, default_variants, report
-from .dedupe import find_cross_duplicates, find_duplicate_groups, move_to_trash, trash_duplicate_groups
+from .dedupe import find_cross_duplicates, find_duplicate_edges, find_duplicate_groups, group_edges, move_to_trash, trash_duplicate_groups
 from .encoder import CLIPImageEncoder, default_model_id, default_seq_len, precision_choices
 from .encoding_pipeline import update_database
 from .keeping import PolicyError, load_policies
 from .log import setup_logging
+from .review import ReviewDB, apply_decisions, default_review_path, store_matches
 from .similarity import DistanceIndex, default_euclidean_distance_threshold, euclidean_distance
 
 logger = logging.getLogger(__name__)
@@ -152,18 +154,51 @@ def cli(verbose: bool) -> None:
 @match_options
 @click.option("--keeping-logic", "-k", default="largest", show_default=True, help="Which copy of a duplicate group to keep (a policy name).")
 @click.option("--keeping-config", type=click.Path(exists=True, dir_okay=False), default=None, help="TOML file adding/overriding keeping policies.")
+@click.option(
+    "--review-threshold", type=float, default=None,
+    help="Review mode: match at this looser distance and store every group in the review database for the GUI / review-apply "
+    "instead of moving anything. Groups entirely within --threshold start pre-decided by the keeping policy.",
+)
+@click.option("--review-db", type=click.Path(dir_okay=False), default=None, help="Review database path (default: <db>.review.sqlite).")
 def dedupe(
     image_dir: str, db: str, model_id: str, device: str, compile_: bool, seq_len: int, batch_size: int, workers: int | None, force_update: bool, clean_orphans: bool,
     skip_update: bool, threshold: float, trash_dir: str | None, dry_run: bool, keeping_logic: str, keeping_config: str | None,
+    review_threshold: float | None, review_db: str | None,
 ) -> None:
     """Find duplicates within one image directory."""
     policy = _policy(keeping_logic, keeping_config)  # validate before spending time on encoding
+    if review_threshold is not None:
+        if trash_dir is not None:
+            raise click.ClickException("--review-threshold stores groups for review and moves nothing; drop --trash-dir.")
+        if review_threshold < threshold:
+            raise click.ClickException(f"--review-threshold ({review_threshold}) must be at least --threshold ({threshold}).")
     if not skip_update:
         with _encoder(model_id, device, compile_=compile_, seq_len=seq_len) as encoder:
             _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
 
     records, index = _load_index(db, device)
     paths = [r.path for r in records]
+    if review_threshold is not None:
+        with _progress(index.n, "Matching") as progress:
+            groups = group_edges(index.n, find_duplicate_edges(paths, index, review_threshold, progress))
+        index.release()
+        review_path = review_db or default_review_path(db)
+        with EmbeddingDB(db) as store, ReviewDB(review_path) as review:
+            try:
+                review.begin_session(
+                    image_dir=image_dir, model_id=store.model_id or "", review_threshold=review_threshold, auto_threshold=threshold, policy=policy.name
+                )
+            except ValueError as e:
+                raise click.ClickException(str(e)) from e
+            stats = store_matches(review, groups, records, policy, threshold)
+            counts = review.counts()
+        logger.info(
+            "Review database %s: %d groups this run (%d new, %d pre-decided within %g, %d seen before), %d went stale; "
+            "now %d pending, %d decided, %d skipped, %d applied",
+            review_path, len(groups), stats.new, stats.predecided, threshold, stats.kept, stats.stale,
+            counts["pending"], counts["decided"], counts["skipped"], counts["applied"],
+        )
+        return
     with _progress(index.n, "Matching") as progress:
         groups = find_duplicate_groups(paths, index, threshold, progress)
     index.release()
@@ -259,6 +294,44 @@ def encode_test(model_id: str, device: str, compile_: bool, seq_len: int, dtype:
     click.echo(f"Feature matrix shape: {features.shape}")
     click.echo("Euclidean distance matrix:")
     click.echo(euclidean_distance(features, features))
+
+
+review_db_option = click.option("--review-db", type=click.Path(dir_okay=False), default=None, help="Review database path (default: <db>.review.sqlite).")
+
+
+@cli.command("review-status")
+@db_arg
+@review_db_option
+def review_status(db: str, review_db: str | None) -> None:
+    """Print what the review database holds."""
+    path = review_db or default_review_path(db)
+    if not os.path.exists(path):
+        raise click.ClickException(f"No review database at {path}. Run dedupe --review-threshold first.")
+    with ReviewDB(path) as review:
+        counts = review.counts()
+        click.echo(f"{path}: model {review.get_meta('model_id')}, review threshold {review.review_threshold}, auto threshold {review.auto_threshold}, policy {review.get_meta('policy')}")
+        for status, n in counts.items():
+            click.echo(f"  {status:8s} {n}")
+        moves = review.plan_apply()
+        click.echo(f"  {len(moves)} files would be moved by review-apply")
+
+
+@cli.command("review-apply")
+@image_dir_arg
+@db_arg
+@review_db_option
+@click.option("--trash-dir", type=click.Path(file_okay=False), required=True, help="Move the losers of decided groups here (mirroring their relative paths).")
+@click.option("--dry-run", "-n", is_flag=True, help="Report what would be moved without moving.")
+def review_apply(image_dir: str, db: str, review_db: str | None, trash_dir: str, dry_run: bool) -> None:
+    """Move the losers of every decided group to the trash directory."""
+    path = review_db or default_review_path(db)
+    if not os.path.exists(path):
+        raise click.ClickException(f"No review database at {path}. Run dedupe --review-threshold first.")
+    with ReviewDB(path) as review:
+        decided = review.groups("decided")
+        with _progress(len(decided), "Applying", "group") as progress:
+            moved, refused = apply_decisions(review, image_dir, trash_dir, dry_run=dry_run, progress=progress)
+    logger.info("Done: %d files %s, %d groups refused because files changed on disk%s", moved, "would be moved" if dry_run else "moved", len(refused), " (dry run)" if dry_run else "")
 
 
 @cli.command("calibrate")

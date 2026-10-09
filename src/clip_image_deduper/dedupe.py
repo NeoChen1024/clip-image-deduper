@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -33,12 +34,6 @@ class _UnionFind:
         if ra != rb:
             self.parent[rb] = ra
 
-    def groups(self) -> list[list[int]]:
-        by_root: dict[int, list[int]] = {}
-        for i in range(len(self.parent)):
-            by_root.setdefault(self.find(i), []).append(i)
-        return [g for g in by_root.values() if len(g) > 1]
-
 
 def _log_matches(prefix: str, query_paths: Sequence[str], match_paths: Sequence[str], ii: np.ndarray, jj: np.ndarray, dd: np.ndarray) -> None:
     order = np.lexsort((jj, ii))
@@ -49,22 +44,61 @@ def _log_matches(prefix: str, query_paths: Sequence[str], match_paths: Sequence[
         logger.info("%s %s: %s", prefix, query_paths[int(i)], matches)
 
 
+@dataclass(slots=True)
+class DuplicateGroup:
+    """A connected component of the "distance <= threshold" relation.
+
+    ``members`` are row indices (sorted); ``edges`` the pairs that connected them, as ``(i, j, distance)`` with
+    ``i < j``. Not every pair of members is an edge: A~B and B~C put A and C in one group even when A-C is above
+    the threshold, which is exactly what a reviewer wants to see.
+    """
+
+    members: list[int]
+    edges: list[tuple[int, int, float]]
+
+    @property
+    def min_distance(self) -> float:
+        return min(d for _, _, d in self.edges)
+
+    @property
+    def max_distance(self) -> float:
+        return max(d for _, _, d in self.edges)
+
+
+def find_duplicate_edges(paths: Sequence[str], index: DistanceIndex, threshold: float, progress: Progress = None) -> list[tuple[int, int, float]]:
+    """Every pair ``(i, j, d)`` with ``i < j`` and ``d <= threshold``, searching the upper triangle in blocks."""
+    edges: list[tuple[int, int, float]] = []
+    for start, end in index.iter_blocks():
+        ii, jj, dd = find_close_pairs_self(index, threshold, start, end)
+        if len(ii):
+            _log_matches("Duplicates of", paths, paths, ii, jj, dd)
+            edges.extend(zip(ii.tolist(), jj.tolist(), dd.tolist()))
+        if progress:
+            progress(end - start)
+    return edges
+
+
+def group_edges(n: int, edges: Sequence[tuple[int, int, float]]) -> list[DuplicateGroup]:
+    """Merge ``edges`` over ``n`` rows into groups (union-find), each with the edges that belong to it."""
+    uf = _UnionFind(n)
+    for i, j, _ in edges:
+        uf.union(i, j)
+    by_root: dict[int, DuplicateGroup] = {}
+    for i, j, d in edges:
+        g = by_root.setdefault(uf.find(i), DuplicateGroup([], []))
+        g.edges.append((i, j, d))
+    for root, g in by_root.items():
+        g.members = sorted({i for i, j, _ in g.edges} | {j for i, j, _ in g.edges})
+    return sorted(by_root.values(), key=lambda g: g.members[0])
+
+
 def find_duplicate_groups(paths: Sequence[str], index: DistanceIndex, threshold: float, progress: Progress = None) -> list[list[int]]:
     """Connected components of the "distance <= threshold" relation, as lists of row indices.
 
     The relation is not transitive: A may match B and B match C while A and C fall just outside the threshold, so all
     edges are collected first and merged with union-find. Only the upper triangle is searched, in blocks of rows.
     """
-    uf = _UnionFind(index.n)
-    for start, end in index.iter_blocks():
-        ii, jj, dd = find_close_pairs_self(index, threshold, start, end)
-        if len(ii):
-            _log_matches("Duplicates of", paths, paths, ii, jj, dd)
-            for i, j in zip(ii.tolist(), jj.tolist()):
-                uf.union(i, j)
-        if progress:
-            progress(end - start)
-    return uf.groups()
+    return [g.members for g in group_edges(index.n, find_duplicate_edges(paths, index, threshold, progress))]
 
 
 def find_cross_duplicates(
