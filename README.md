@@ -60,6 +60,16 @@ clip-image-deduper update-db -i pictures -d pictures.sqlite
 clip-image-deduper encode-test a.jpg a_copy.png b.jpg
 ```
 
+Review the band between the automatic threshold and a looser one in a GUI instead of trusting a single number:
+
+```shell
+uv pip install -e '.[gui]'
+clip-image-deduper dedupe -i pictures -d pictures.sqlite --review-threshold 1.5   # stores groups, moves nothing
+clip-image-deduper-review -d pictures.sqlite --trash-dir trash                     # decide, then Apply
+clip-image-deduper review-status -d pictures.sqlite                                # or apply from the CLI:
+clip-image-deduper review-apply -i pictures -d pictures.sqlite --trash-dir trash
+```
+
 Calibrate a threshold from the collection itself: sample images, synthesize lossy copies of them, and print
 histograms of how far the copies land from the stored embedding next to how far the nearest *different* image is:
 
@@ -131,6 +141,24 @@ criteria = [
 
 `policies.toml` documents the three criterion kinds (`prefer`, `match`, `order`).
 
+## Reviewing duplicates
+
+`dedupe --review-threshold T` matches at `T` and writes every group into `pictures.review.sqlite` (next to the
+embedding database) instead of moving anything. Groups whose every pair is within the normal `--threshold` start
+*decided* with the keeping policy's winner ticked, so what `dedupe` would have merged on its own needs no attention;
+everything else starts *pending*. Groups are keyed by their member paths, so re-running the match (after adding
+images, or with another threshold) keeps the decisions of groups whose membership did not change and marks the
+others stale.
+
+`clip-image-deduper-review` opens that file: group list on the left (surest first, status badge per row), two linked
+image views in the middle (side by side, flip while holding Space, or an amplified difference), members with
+thumbnails and keep checkboxes on the right. Z/X move between groups, 1-9 pick which member is shown as A
+(Shift+1-9 for B), K toggles keep on A, Enter marks the group decided and jumps to the next pending one, U undoes,
+F1 lists everything. Decisions are committed to the review database as they are made. **Apply** (Ctrl+Enter) lists
+every move, then moves the losers of decided groups to the trash directory; groups whose files changed on disk since
+matching are refused, and an applied group can be undone while the trash directory is untouched. Nothing is ever
+deleted. `review-status` and `review-apply` do the same from the CLI.
+
 ## How it works
 
 **Database.** Table `embeddings` has one row per image: `path` (relative to the image directory), `mtime`, `size`,
@@ -174,7 +202,7 @@ JPEG q90 re-save of a picture lands 5 to 15 away from the original, overlapping 
 
 * [ ] Store a mean-centered copy or normalized embeddings to make thresholds model-independent? (`calibrate` now
   measures the scale per model instead.)
-* [ ] PySide6 review GUI for the band between the automatic and a looser threshold: plan in
-  [docs/gui-review.md](docs/gui-review.md).
+* [x] PySide6 review GUI for the band between the automatic and a looser threshold (`clip-image-deduper-review`;
+  design notes in [docs/gui-review.md](docs/gui-review.md)).
 * [ ] Train a custom model for anime image comparison, and later anime semantic search? Notes in
   [docs/training-clip.md](docs/training-clip.md), scripts under `src/clip_training`.

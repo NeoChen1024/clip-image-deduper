@@ -1,4 +1,7 @@
-# Duplicate review GUI (PySide6) — plan
+# Duplicate review GUI (PySide6)
+
+Status: implemented (`src/clip_image_deduper/gui`, `clip-image-deduper-review`). The text below is the design it
+follows; deviations are noted inline.
 
 A reviewer for the cases the CLI must not decide on its own: pairs that are clearly related but not bit-identical
 (lossy copies, downscales, crops, variants of the same picture). The CLI stays the batch tool; the GUI reads the same
@@ -166,7 +169,15 @@ tests/test_gui.py                         QT_QPA_PLATFORM=offscreen: key map, fo
 install stays small. Tests for the GUI run under `QT_QPA_PLATFORM=offscreen` and are skipped when PySide6 is not
 installed.
 
-## Milestones
+## Deviations from the plan
+
+* `calibrate` does not yet write its suggestion into the database, so the review threshold is always given on the
+  command line.
+* Apply runs synchronously with a progress dialog rather than in a job: moves are quick and must not interleave
+  with decisions.
+* Ctrl+S is unbound (every decision commits immediately).
+
+## Milestones (as planned)
 
 1. `review.py`: groups with edges, the review SQLite schema, decisions, undo, re-match upsert by group key. Tests.
    CLI gains `--review-threshold` on `dedupe` that writes groups in the band to the review database instead of

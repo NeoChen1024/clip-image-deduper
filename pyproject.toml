@@ -16,6 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The PySide6 review GUI (clip-image-deduper-review). The CLI never imports Qt.
+gui = ["PySide6>=6.7"]
 # Dataset preprocessing and CLIP fine-tuning scripts (src/clip_training), not needed for deduplication.
 training = [
     "accelerate",
@@ -32,6 +34,7 @@ training = [
 
 [project.scripts]
 clip-image-deduper = "clip_image_deduper.cli:cli"
+clip-image-deduper-review = "clip_image_deduper.gui.app:main"
 clip-dataset-preprocess = "clip_training.dataset_preprocessing:main"
 
 [build-system]
