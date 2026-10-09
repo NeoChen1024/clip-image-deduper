@@ -62,21 +62,26 @@ clip-image-deduper encode-test a.jpg a_copy.png b.jpg
 ### Options worth knowing
 
 * `-t, --threshold` (default `0.1`): Euclidean distance at or below which two images are duplicates. With the default
-  model, bit-identical re-encodes are well under 0.1; a JPEG q90 re-save, a WebP or a 50% downscale of the same picture
-  land roughly between 0.4 and 3, and different pictures at 5 and above. Raise the threshold if you want lossy copies
-  caught too; `encode-test` on a few known pairs is the quickest way to calibrate.
+  model, bit-identical re-encodes are well under 0.1; a JPEG q90 re-save or a 50% downscale of the same picture lands
+  around 0.2-0.5, a 25% downscale up to about 2.4, and different pictures at 5.5 and above. Raise the threshold if
+  you want lossy copies caught too; `encode-test` on a few known pairs is the quickest way to calibrate.
 * `-k, --keeping-logic` (default `largest`) and `--keeping-config`: see below.
 * `-n, --dry-run`: report what would be moved without moving. The database is still refreshed; add `--skip-update`
   for a run that writes nothing at all.
-* `-m, --model-id`: a timm model name; any CLIP/SigLIP image tower timm ships works (e.g. `vit_pe_core_bigG_14_448.fb`).
-  A database is bound to the model it was encoded with; switching models on an existing database requires
-  `-f, --force-update`, which re-encodes everything.
+* `-m, --model-id`: a timm model name; any CLIP/SigLIP image tower timm ships works, NaFlex (`naflexvit_*`) or
+  fixed-resolution (e.g. `vit_so400m_patch16_siglip_512.v2_webli`, `vit_pe_core_bigG_14_448.fb`). A database is bound
+  to the model it was encoded with; switching models on an existing database requires `-f, --force-update`, which
+  re-encodes everything.
+* `--seq-len` (default `1024`): for NaFlex towers, the patch budget per image. The image keeps its aspect ratio and is
+  resized to at most this many 16x16 patches; 1024 is the pixel budget of a 512px fixed model and costs the same
+  time and VRAM. Lower it on small GPUs. It is part of the identity a database is bound to.
 * `-b, --batch-size`: images per forward pass; raise it if VRAM allows. The default model is compute bound already at
   4, so this barely changes throughput.
 * `-j, --workers`: decoder processes (default: one per CPU); twice as many reads are kept in flight. On network or
   spinning storage the reads are the bottleneck, so a value above the CPU count helps there.
-* `--compile`: `torch.compile` the model. About 10% faster, 5-20 s warm-up per run, and the batch size becomes
-  fixed.
+* `--compile`: `torch.compile` the model with dynamic shapes, so the batch size stays free. About 17% faster for
+  fixed-resolution towers, 20-30 s warm-up per run. No gain for the default NaFlex tower yet: timm's NaFlex
+  position-embedding code breaks the graph.
 * FP16 inference is not batch-invariant: the same image encoded in a different batch (size or neighbours) comes out
   up to ~0.04 away, with or without `--compile`. That is far below the default threshold and the ~0.4+ of a lossy
   copy, but it is the reason distances between near-identical files are not exactly zero.
@@ -129,7 +134,7 @@ matmul form loses about 1e-2 near zero distance, which is why the kernel exists.
 0.7 GiB on the Triton path and 1.1 GiB on the fallback.
 
 **Encoding pipeline.** `--workers` processes each open a file, decode it, and run the model's full preprocessing
-(resize, normalize, cast to the model dtype), so the main process only ever sees ready-to-stack arrays. It keeps
+(resize, normalize, patchify, cast to the model dtype), so the main process only ever sees ready-to-stack arrays. It keeps
 `2 * workers` decode jobs in flight, gathers results into batches as they complete (a slow file never blocks the
 others), stages each batch in pinned memory and submits it to the GPU without waiting; the previous batch's result is
 collected and written to the database only once the next one is queued. Memory is bounded by `2 * workers` arrays
@@ -137,13 +142,18 @@ plus two batches. Measured on 1000 cached 4 MB images (RTX 4080, 16 CPUs): the G
 size, 16 decoders alone 74 img/s, and the pipeline reaches 42 img/s against 24 img/s for the previous version at the
 same batch size of 4.
 
-**Model.** Only the image tower is needed, so it is loaded straight from timm (`vit_so400m_patch16_siglip_512.v2_webli`,
-1.6 GiB; the full open_clip checkpoint with the text tower is 4.3 GiB). open_clip builds these towers from timm anyway,
-and the embeddings are bit-identical to its `encode_image`. One trap: timm's default eval transform center-crops 90%
-and the transformers processor resizes bilinearly; both shift embeddings by up to several units. The encoder forces
-`crop_pct=1.0, crop_mode="squash"` with bicubic resampling, which is what the models were trained with.
-`PE-Core-bigG-14-448` was the previous default and is noticeably more sensitive to compression artifacts: a JPEG q90
-re-save of a picture lands 5 to 15 away from the original, overlapping with the distance between different pictures.
+**Model.** Only the image tower is needed, so it is loaded straight from timm (`naflexvit_so400m_patch16_siglip.v2_webli`,
+the SigLIP2 so400m NaFlex tower, 1.6 GiB; the full checkpoint with the text tower is 4.3 GiB). NaFlex takes the image
+at its own aspect ratio: the decoder resizes it to at most `--seq-len` 16x16 patches, normalizes and patchifies it,
+and the encoder pads the patch sequences of a batch to `--seq-len` with a validity mask. Nothing is squashed or
+cropped, which is what makes it tighter than the fixed-size towers on the variants a deduper cares about. Measured on
+24 library images against `vit_so400m_patch16_siglip_512` (the previous default), as distance to the original /
+smallest distance between different images: JPEG q90 0.5 / 5.6 vs 0.7 / 8.7, 50% downscale 0.4 / 5.6 vs 1.4 / 8.7,
+25% downscale 2.4 / 5.6 vs 4.3 / 8.7. Same speed and VRAM at `--seq-len 1024`. Fixed-resolution towers still work:
+for them the encoder forces `crop_pct=1.0, crop_mode="squash"` with bicubic resampling, which is what they were
+trained with (timm's default eval transform center-crops 90% and shifts embeddings by several units).
+`PE-Core-bigG-14-448` was the default before SigLIP2 and is noticeably more sensitive to compression artifacts: a
+JPEG q90 re-save of a picture lands 5 to 15 away from the original, overlapping with different pictures.
 
 ## Roadmap
 

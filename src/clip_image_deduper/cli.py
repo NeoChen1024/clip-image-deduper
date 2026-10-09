@@ -14,7 +14,7 @@ import tqdm
 
 from .db_store import ImageRecord, load_database
 from .dedupe import find_cross_duplicates, find_duplicate_groups, move_to_trash, trash_duplicate_groups
-from .encoder import CLIPImageEncoder, default_model_id, precision_choices
+from .encoder import CLIPImageEncoder, default_model_id, default_seq_len, precision_choices
 from .encoding_pipeline import update_database
 from .keeping import PolicyError, load_policies
 from .log import setup_logging
@@ -40,7 +40,11 @@ def _options(*decorators: Callable) -> Callable:
 model_options = _options(
     click.option("--model-id", "-m", default=default_model_id, show_default=True, help="timm model name of the image tower (any CLIP/SigLIP tower timm ships)."),
     click.option("--device", "-c", default=default_device, show_default=True, help="Device to run the model and the matching on."),
-    click.option("--compile", "compile_", is_flag=True, help="torch.compile the model (~10%% faster, 5-20 s warm-up, fixed batch size)."),
+    click.option("--compile", "compile_", is_flag=True, help="torch.compile the model (dynamic shapes, 20-30 s warm-up). ~17%% faster for fixed-resolution towers, no gain for NaFlex towers yet."),
+    click.option(
+        "--seq-len", type=int, default=default_seq_len, show_default=True,
+        help="NaFlex towers only: patch budget per image (16x16 patches, aspect ratio kept). 1024 matches a 512px fixed model in speed and VRAM; part of the model identity a DB is bound to.",
+    ),
 )
 
 update_options = _options(
@@ -85,8 +89,10 @@ def _progress(total: int, desc: str, unit: str = "image") -> Generator[Callable[
 
 
 @contextlib.contextmanager
-def _encoder(model_id: str, device: str, dtype: str | None = None, *, compile_: bool = False, batch_size: int = 1) -> Generator[CLIPImageEncoder, None, None]:
-    encoder = CLIPImageEncoder(model_id=model_id, device=device, dtype=dtype, compile=compile_, batch_size=batch_size)
+def _encoder(
+    model_id: str, device: str, dtype: str | None = None, *, compile_: bool = False, seq_len: int = default_seq_len
+) -> Generator[CLIPImageEncoder, None, None]:
+    encoder = CLIPImageEncoder(model_id=model_id, device=device, dtype=dtype, compile=compile_, seq_len=seq_len)
     try:
         yield encoder
     finally:
@@ -146,13 +152,13 @@ def cli(verbose: bool) -> None:
 @click.option("--keeping-logic", "-k", default="largest", show_default=True, help="Which copy of a duplicate group to keep (a policy name).")
 @click.option("--keeping-config", type=click.Path(exists=True, dir_okay=False), default=None, help="TOML file adding/overriding keeping policies.")
 def dedupe(
-    image_dir: str, db: str, model_id: str, device: str, compile_: bool, batch_size: int, workers: int | None, force_update: bool, clean_orphans: bool,
+    image_dir: str, db: str, model_id: str, device: str, compile_: bool, seq_len: int, batch_size: int, workers: int | None, force_update: bool, clean_orphans: bool,
     skip_update: bool, threshold: float, trash_dir: str | None, dry_run: bool, keeping_logic: str, keeping_config: str | None,
 ) -> None:
     """Find duplicates within one image directory."""
     policy = _policy(keeping_logic, keeping_config)  # validate before spending time on encoding
     if not skip_update:
-        with _encoder(model_id, device, compile_=compile_, batch_size=batch_size) as encoder:
+        with _encoder(model_id, device, compile_=compile_, seq_len=seq_len) as encoder:
             _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
 
     records, index = _load_index(db, device)
@@ -182,12 +188,12 @@ def dedupe(
 @update_options
 @match_options
 def dedupe_import(
-    base_image_dir: str, base_db: str, import_image_dir: str, import_db: str, model_id: str, device: str, compile_: bool, batch_size: int, workers: int | None,
+    base_image_dir: str, base_db: str, import_image_dir: str, import_db: str, model_id: str, device: str, compile_: bool, seq_len: int, batch_size: int, workers: int | None,
     force_update: bool, clean_orphans: bool, skip_update: bool, threshold: float, trash_dir: str | None, dry_run: bool,
 ) -> None:
     """Remove images from an import directory that already exist in a base directory."""
     if not skip_update:
-        with _encoder(model_id, device, compile_=compile_, batch_size=batch_size) as encoder:
+        with _encoder(model_id, device, compile_=compile_, seq_len=seq_len) as encoder:
             _update(encoder, base_image_dir, base_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
             _update(encoder, import_image_dir, import_db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
 
@@ -219,11 +225,11 @@ def dedupe_import(
 @model_options
 @update_options
 def update_db(
-    image_dir: str, db: str, model_id: str, device: str, compile_: bool, batch_size: int, workers: int | None, force_update: bool, clean_orphans: bool, skip_update: bool
+    image_dir: str, db: str, model_id: str, device: str, compile_: bool, seq_len: int, batch_size: int, workers: int | None, force_update: bool, clean_orphans: bool, skip_update: bool
 ) -> None:
     """Only (re)encode images into the database, without matching."""
     if not skip_update:
-        with _encoder(model_id, device, compile_=compile_, batch_size=batch_size) as encoder:
+        with _encoder(model_id, device, compile_=compile_, seq_len=seq_len) as encoder:
             _update(encoder, image_dir, db, force_update=force_update, clean_orphans=clean_orphans, batch_size=batch_size, workers=workers)
     records, embeddings = load_database(db)
     logger.info("%s holds %d embeddings of shape %s", db, len(records), embeddings.shape[1:])
@@ -233,11 +239,11 @@ def update_db(
 @model_options
 @click.option("--dtype", type=click.Choice(precision_choices, case_sensitive=False), default=None, help="Model precision (default: fp16 on CUDA, fp32 otherwise).")
 @click.argument("image_paths", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False))
-def encode_test(model_id: str, device: str, compile_: bool, dtype: str | None, image_paths: tuple[str, ...]) -> None:
+def encode_test(model_id: str, device: str, compile_: bool, seq_len: int, dtype: str | None, image_paths: tuple[str, ...]) -> None:
     """Encode a few images and print their pairwise distance matrix (for picking a threshold)."""
     import PIL.Image
 
-    with _encoder(model_id, device, dtype, compile_=compile_, batch_size=4) as encoder:
+    with _encoder(model_id, device, dtype, compile_=compile_, seq_len=seq_len) as encoder:
         images = []
         for p in image_paths:
             try:

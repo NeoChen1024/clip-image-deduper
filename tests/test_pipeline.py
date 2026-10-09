@@ -13,7 +13,7 @@ from clip_image_deduper.encoding_pipeline import find_candidates, is_image_path,
 
 
 def _fake_preprocess(img):
-    return torch.zeros(3, 4, 4)
+    return np.zeros((3, 4, 4), dtype=np.float16)
 
 
 class StubEncoder:
@@ -21,13 +21,12 @@ class StubEncoder:
 
     model_id = "stub"
     dim = 8
-    array_dtype = np.dtype(np.float16)
 
     def get_preprocessor(self):
         return _fake_preprocess
 
     def submit(self, arrays):
-        assert all(a.dtype == self.array_dtype and a.shape == (3, 4, 4) for a in arrays), "workers must deliver fully preprocessed arrays"
+        assert all(a.dtype == np.float16 and a.shape == (3, 4, 4) for a in arrays), "workers must deliver fully preprocessed arrays"
         return len(arrays)
 
     def collect(self, pending):

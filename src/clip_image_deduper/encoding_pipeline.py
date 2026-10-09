@@ -10,13 +10,12 @@ import os
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 
-import numpy as np
 import PIL.Image
 import PIL.ImageFile
 import torch
 
 from .db_store import EmbeddingDB, ImageRecord, ModelMismatchError
-from .encoder import CLIPImageEncoder, PendingBatch
+from .encoder import CLIPImageEncoder, PendingBatch, Preprocessed
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +42,12 @@ def is_image_path(relative_path: str) -> bool:
 
 
 def _load_image(
-    preprocessor: Callable, array_dtype: np.dtype, image_dir: str, relative_path: str
-) -> tuple[str, tuple[ImageRecord, np.ndarray] | Exception]:
-    """Worker: decode one image and run the model's full preprocessing (resize, normalize, dtype cast).
+    preprocessor: Callable[[PIL.Image.Image], Preprocessed], image_dir: str, relative_path: str
+) -> tuple[str, tuple[ImageRecord, Preprocessed] | Exception]:
+    """Worker: decode one image and run the model's full preprocessing (resize, normalize, patchify, dtype cast).
 
-    The main process gets back a ready-to-stack ``(C, H, W)`` array in the model's dtype, so all it has to do for
-    the GPU is gather a batch and copy it over. Returns the record + array, or the exception.
+    The main process gets back ready-to-stack arrays in the model's dtype, so all it has to do for the GPU is
+    gather a batch and copy it over. Returns the record + arrays, or the exception.
 
     Any failure here means "skip this file", so the catch is deliberately broad: a corrupt file must not take the
     whole run down, and Pillow raises a wide variety of exception types for broken inputs.
@@ -59,9 +58,9 @@ def _load_image(
         with PIL.Image.open(image_path) as img:
             fmt = img.format or os.path.splitext(relative_path)[1].lstrip(".").upper()
             width, height = img.size
-            array = preprocessor(img.convert("RGB")).numpy().astype(array_dtype, copy=False)  # animated: first frame
+            arrays = preprocessor(img.convert("RGB"))  # animated: first frame
         record = ImageRecord(relative_path, st.st_mtime, st.st_size, width, height, fmt)
-        return relative_path, (record, array)
+        return relative_path, (record, arrays)
     except Exception as e:  # noqa: BLE001 - see docstring
         return relative_path, e
 
@@ -126,9 +125,8 @@ def encode_images(
     workers = max(1, workers)
     window = 2 * workers
     preprocessor = encoder.get_preprocessor()
-    array_dtype = encoder.array_dtype
     stored = 0
-    batch: list[tuple[ImageRecord, np.ndarray]] = []
+    batch: list[tuple[ImageRecord, Preprocessed]] = []
     in_flight: tuple[list[ImageRecord], PendingBatch] | None = None
 
     def finish() -> None:
@@ -157,7 +155,7 @@ def encode_images(
 
         def refill() -> None:
             for rel in todo:
-                pending_jobs.add(pool.submit(_load_image, preprocessor, array_dtype, image_dir, rel))
+                pending_jobs.add(pool.submit(_load_image, preprocessor, image_dir, rel))
                 if len(pending_jobs) >= window:
                     break
 
