@@ -193,6 +193,12 @@ class GuiTests(unittest.TestCase):
         self.assertFalse(self.win.zoom_actions["actual"].isChecked() or self.win.zoom_actions["fit"].isChecked())
         self.key(Qt.Key.Key_Home)
         self.assertTrue(self.win.zoom_actions["fit"].isChecked())
+        self.win.zoom_actions["fit"].trigger()  # clicking the depressed button must not release it
+        self.assertTrue(self.win.zoom_actions["fit"].isChecked())
+        self.win.zoom_actions["actual"].trigger()
+        self.win.zoom_actions["actual"].trigger()
+        self.assertTrue(self.win.zoom_actions["actual"].isChecked())
+        self.assertEqual(self.win.canvas.zoom_state, "actual")
 
     def test_filter(self):
         self.win.filter.setCurrentText("pending")

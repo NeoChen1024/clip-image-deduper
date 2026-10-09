@@ -117,9 +117,10 @@ class ReviewWindow(QMainWindow):
         self.zoom_group = QActionGroup(self)
         self.zoom_group.setExclusive(True)
         self.zoom_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)  # neither is checked after a manual zoom
+        # Clicking the depressed button would release it (ExclusiveOptional); the handlers re-assert the state.
         self.zoom_actions = {
-            "fit": self._action(bar, "Fit", lambda: self.canvas.fit(), checkable=True),
-            "actual": self._action(bar, "100%", lambda: self.canvas.actual_size(), checkable=True),
+            "fit": self._action(bar, "Fit", lambda: (self.canvas.fit(), self._zoom_changed("fit")), checkable=True),
+            "actual": self._action(bar, "100%", lambda: (self.canvas.actual_size(), self._zoom_changed("actual")), checkable=True),
         }
         for action in self.zoom_actions.values():
             self.zoom_group.addAction(action)

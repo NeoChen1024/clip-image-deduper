@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView, QHBoxLayout, QWidget
 
@@ -113,6 +113,13 @@ class CompareCanvas(QWidget):
         self.a, self.b, self.diff, self.diff_plain = a, b, None, None
         self._show()
         if fit:
+            self.fit()
+            # Scrollbars left over from the previous picture shrink the viewport while fitting; fit again once Qt
+            # has laid the new scene out.
+            QTimer.singleShot(0, self._refit_if_auto)
+
+    def _refit_if_auto(self) -> None:
+        if self._auto_fit:
             self.fit()
 
     def set_diff(self, diff: QImage | None, plain: QImage | None = None) -> None:
