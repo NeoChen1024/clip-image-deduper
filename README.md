@@ -33,7 +33,8 @@ uv pip install -e .
 ```
 
 A plain `python -m venv .venv` + `pip install -e .` works too. `pip install -e '.[training]'` adds the dependencies of
-the CLIP fine-tuning scripts under `src/clip_training`, which are not needed for deduplication.
+the CLIP fine-tuning scripts under `src/clip_training` (see `docs/training-clip.md`), which are not needed for
+deduplication.
 
 ## Usage
 
@@ -158,4 +159,5 @@ JPEG q90 re-save of a picture lands 5 to 15 away from the original, overlapping 
 ## Roadmap
 
 * [ ] Store a mean-centered copy or normalized embeddings to make thresholds model-independent?
-* [ ] Train a custom model for anime image comparison? (`src/clip_training`)
+* [ ] Train a custom model for anime image comparison, and later anime semantic search? Notes in
+  [docs/training-clip.md](docs/training-clip.md), scripts under `src/clip_training`.
