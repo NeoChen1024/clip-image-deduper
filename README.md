@@ -48,8 +48,8 @@ clip-image-deduper dedupe -i pictures -d pictures.sqlite --trash-dir trash -k hi
 Remove images from an "importing" directory that already exist in a "base" collection:
 
 ```shell
-clip-image-deduper import --base-image-dir pictures --base-db pictures.sqlite \
-                          --import-image-dir incoming --import-db incoming.sqlite --trash-dir trash
+clip-image-deduper dedupe-import --base-image-dir pictures --base-db pictures.sqlite \
+                                 --import-image-dir incoming --import-db incoming.sqlite --trash-dir trash
 ```
 
 Only (re)encode a directory into its database, or print the distance matrix of a few images to pick a threshold:

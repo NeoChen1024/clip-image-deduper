@@ -53,14 +53,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("Unknown keeping policy", result.output)
         enc_cls.assert_not_called()
 
-    def test_import_dry_run_refreshes_both_databases(self):
+    def test_dedupe_import_dry_run_refreshes_both_databases(self):
         base_img = os.path.join(self.tmp.name, "base")
         os.makedirs(base_img)
         with mock.patch.object(cli_mod, "CLIPImageEncoder"), mock.patch.object(cli_mod, "update_database") as upd, mock.patch.object(
             cli_mod, "load_database", side_effect=[(_records("b.jpg"), np.array([[0.0]], dtype=np.float32)), (_records("i.jpg"), np.array([[0.0]], dtype=np.float32))]
         ):
             result = self.runner.invoke(
-                cli, ["import", "--base-image-dir", base_img, "--base-db", "b.sqlite", "--import-image-dir", self.img, "--import-db", "i.sqlite", "-n", "-c", "cpu"]
+                cli, ["dedupe-import", "--base-image-dir", base_img, "--base-db", "b.sqlite", "--import-image-dir", self.img, "--import-db", "i.sqlite", "-n", "-c", "cpu"]
             )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual([c.args[1:3] for c in upd.call_args_list], [(base_img, "b.sqlite"), (self.img, "i.sqlite")])

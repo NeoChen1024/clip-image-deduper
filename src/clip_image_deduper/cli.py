@@ -173,7 +173,7 @@ def dedupe(
     )
 
 
-@cli.command("import")
+@cli.command("dedupe-import")
 @click.option("--base-image-dir", type=click.Path(exists=True, file_okay=False), required=True, help="Directory of images already in the collection.")
 @click.option("--base-db", type=click.Path(dir_okay=False), required=True, help="Embedding database for --base-image-dir.")
 @click.option("--import-image-dir", type=click.Path(exists=True, file_okay=False), required=True, help="Directory of images to be imported.")
@@ -181,7 +181,7 @@ def dedupe(
 @model_options
 @update_options
 @match_options
-def import_(
+def dedupe_import(
     base_image_dir: str, base_db: str, import_image_dir: str, import_db: str, model_id: str, device: str, compile_: bool, batch_size: int, workers: int | None,
     force_update: bool, clean_orphans: bool, skip_update: bool, threshold: float, trash_dir: str | None, dry_run: bool,
 ) -> None:
