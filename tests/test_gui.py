@@ -209,3 +209,22 @@ class CanvasTests(unittest.TestCase):
         canvas.actual_size()
         self.assertEqual(canvas.scale_factor(), 1.0)
         canvas.close()
+
+    def test_fit_ignores_the_hidden_view(self):
+        from clip_image_deduper.gui.jobs import qimage
+
+        canvas = CompareCanvas()
+        canvas.resize(400, 200)
+        canvas.show()
+        QApplication.processEvents()
+        canvas.set_images(qimage(PIL.Image.new("RGB", (100, 50))), qimage(PIL.Image.new("RGB", (100, 50))))
+        side = canvas.scale_factor()
+        canvas.set_mode("flip")
+        QApplication.processEvents()
+        canvas.fit()
+        self.assertGreater(canvas.scale_factor(), side * 1.5)  # one view has the whole width now
+        canvas.zoom(1.5)
+        canvas.resize(500, 300)
+        QApplication.processEvents()
+        self.assertFalse(canvas._auto_fit)  # a manual zoom survives resizes
+        canvas.close()

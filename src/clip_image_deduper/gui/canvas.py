@@ -96,6 +96,7 @@ class CompareCanvas(QWidget):
         self.b: QImage | None = None
         self.diff: QImage | None = None
         self.diff_plain: QImage | None = None
+        self._auto_fit = True
         self._syncing = False
         for view in (self.left, self.right):
             view.wheel.connect(self._wheel)
@@ -155,6 +156,8 @@ class CompareCanvas(QWidget):
         self._show()
         self.left.setTransform(transform)
         self.right.setTransform(transform)
+        if self._auto_fit:
+            self.fit()
         self.mode_changed.emit(mode)
 
     def cycle_mode(self) -> str:
@@ -170,21 +173,38 @@ class CompareCanvas(QWidget):
 
     # -- zoom / pan ------------------------------------------------------------------------------------------------
 
+    def _active_views(self) -> list[ImageView]:
+        views = [self.left] if self.mode != "side" else [self.left, self.right]
+        return [v for v in views if v.image_size != (0, 0)]
+
     def fit(self) -> None:
-        for view in (self.left, self.right):
-            if view.image_size != (0, 0):
-                view.fitInView(view.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-        # Both views share the smaller scale so the pictures line up.
-        scale = min(v.transform().m11() for v in (self.left, self.right) if v.image_size != (0, 0)) if self.a or self.b else 1.0
+        """Fit the visible view(s); in side-by-side mode both get the smaller scale so the pictures line up.
+
+        Hidden views are ignored: their viewport is stale and would drag the shared scale down to a thumbnail.
+        """
+        self._auto_fit = True
+        views = self._active_views()
+        if not views:
+            return
+        for view in views:
+            view.fitInView(view.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        scale = min(v.transform().m11() for v in views)
         for view in (self.left, self.right):
             view.resetTransform()
             view.scale(scale, scale)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        if self._auto_fit:
+            self.fit()
+
     def actual_size(self) -> None:
+        self._auto_fit = False
         for view in (self.left, self.right):
             view.resetTransform()
 
     def zoom(self, factor: float) -> None:
+        self._auto_fit = False
         for view in (self.left, self.right):
             view.scale(factor, factor)
 
