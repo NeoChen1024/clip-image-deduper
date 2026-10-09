@@ -8,7 +8,7 @@ import torch
 
 from clip_image_deduper.dedupe_import_dir import main as import_dedupe_main
 from clip_image_deduper.main import find_duplicate_groups, main as self_dedupe_main, select_image_to_keep
-from clip_image_deduper.similarity import find_similar_images_euclidean
+from clip_image_deduper.similarity import DistanceIndex, find_similar_images_euclidean
 from clip_training.dataset_preprocessing import output_relative_image_path
 
 
@@ -22,6 +22,9 @@ class _Recorder:
 
     def write(self, message):
         self.messages.append(message)
+
+    def update(self, n=1):
+        pass
 
 
 class SimilarityRegressionTests(unittest.TestCase):
@@ -37,12 +40,25 @@ class SimilarityRegressionTests(unittest.TestCase):
         embeddings = np.array([[0.0], [0.9], [1.8]], dtype=np.float32)
         groups = find_duplicate_groups(
             image_paths,
-            embeddings,
-            torch.from_numpy(embeddings),
+            DistanceIndex(embeddings, "cpu"),
             threshold=1.0,
             t=_Recorder(image_paths),
         )
         self.assertEqual(groups, [["A", "B", "C"]])
+
+    def test_duplicate_groups_span_block_boundaries(self):
+        # Force tiny query blocks so pairs straddle block edges; each unordered pair must be found exactly once.
+        rng = np.random.default_rng(0)
+        base = rng.standard_normal((40, 8)).astype(np.float32) * 10
+        dup = base[[3, 17, 29, 38]] + 0.01  # four near-duplicates of existing rows
+        embeddings = np.concatenate([base, dup]).astype(np.float32)
+        image_paths = [f"img{i}" for i in range(len(embeddings))]
+        index = DistanceIndex(embeddings, "cpu")
+        with mock.patch.object(DistanceIndex, "query_block_size", return_value=7):
+            recorder = _Recorder()
+            groups = find_duplicate_groups(image_paths, index, threshold=0.5, t=recorder)
+        self.assertEqual(sorted(sorted(g) for g in groups), sorted([["img17", "img41"], ["img29", "img42"], ["img3", "img40"], ["img38", "img43"]]))
+        self.assertEqual(len(recorder.messages), 4)
 
 
 class KeepingLogicRegressionTests(unittest.TestCase):
@@ -91,14 +107,14 @@ class DryRunRegressionTests(unittest.TestCase):
         ) as update_database, mock.patch("clip_image_deduper.main.load_database") as load_database, mock.patch(
             "clip_image_deduper.main.find_duplicate_groups"
         ) as find_duplicate_groups:
-            encoder = object()
+            encoder = mock.Mock()
             encoder_cls.return_value = encoder
-            load_database.return_value = (["a.jpg"], [np.array([0.0], dtype=np.float32)])
+            load_database.return_value = (["a.jpg"], np.array([[0.0]], dtype=np.float32))
             find_duplicate_groups.return_value = []
 
             self_dedupe_main.callback(
                 image_dir="images",
-                db_dir="db",
+                db="db.sqlite",
                 model_id="model",
                 force_update=False,
                 clean_orphans=True,
@@ -112,27 +128,23 @@ class DryRunRegressionTests(unittest.TestCase):
             )
 
             encoder_cls.assert_called_once_with(model_id="model", device="cpu")
-            update_database.assert_called_once_with(encoder, "images", "db", False, True, batch_size=4)
+            update_database.assert_called_once_with(encoder, "images", "db.sqlite", False, True, batch_size=4)
 
     def test_import_dedupe_dry_run_still_refreshes_both_databases(self):
         with mock.patch("clip_image_deduper.dedupe_import_dir.CLIPImageEncoder") as encoder_cls, mock.patch(
             "clip_image_deduper.dedupe_import_dir.update_database"
-        ) as update_database, mock.patch("clip_image_deduper.dedupe_import_dir.load_database") as load_database, mock.patch(
-            "clip_image_deduper.dedupe_import_dir.find_similar_images_euclidean"
-        ) as find_similar_images:
-            encoder = object()
+        ) as update_database, mock.patch("clip_image_deduper.dedupe_import_dir.load_database") as load_database:
+            encoder = mock.Mock()
             encoder_cls.return_value = encoder
             load_database.side_effect = [
-                (["base.jpg"], [np.array([0.0], dtype=np.float32)]),
-                (["import.jpg"], [np.array([0.0], dtype=np.float32)]),
+                (["base.jpg"], np.array([[0.0]], dtype=np.float32)),
+                (["import.jpg"], np.array([[0.0]], dtype=np.float32)),
             ]
-            find_similar_images.return_value = []
-
             import_dedupe_main.callback(
                 base_image_dir="base-images",
-                base_db_dir="base-db",
+                base_db="base.sqlite",
                 import_image_dir="import-images",
-                import_db_dir="import-db",
+                import_db="import.sqlite",
                 model_id="model",
                 force_update=False,
                 clean_orphans=True,
@@ -148,8 +160,8 @@ class DryRunRegressionTests(unittest.TestCase):
             self.assertEqual(update_database.call_count, 2)
             update_database.assert_has_calls(
                 [
-                    mock.call(encoder, "base-images", "base-db", False, True, batch_size=4),
-                    mock.call(encoder, "import-images", "import-db", False, True, batch_size=4),
+                    mock.call(encoder, "base-images", "base.sqlite", False, True, batch_size=4),
+                    mock.call(encoder, "import-images", "import.sqlite", False, True, batch_size=4),
                 ]
             )
 

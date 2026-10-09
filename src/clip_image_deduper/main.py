@@ -17,8 +17,9 @@ import tqdm
 from .clip_encoding import CLIPImageEncoder, default_model_id
 from .db_processing import load_database, update_database
 from .similarity import (
+    DistanceIndex,
     default_euclidean_distance_threshold,
-    find_similar_images_euclidean,
+    find_close_pairs_self,
 )
 
 keeping_modes = ["newest", "largest", "highest-quality", "pic-dir"]
@@ -110,8 +111,7 @@ def select_image_to_keep(root_dir: str, dup_group: List[str], keeping_logic: str
 
 def find_duplicate_groups(
     image_paths: List[str],
-    embeddings_db: np.ndarray,
-    embeddings_torch: torch.Tensor,
+    index: DistanceIndex,
     threshold: float,
     t,
 ) -> List[List[str]]:
@@ -121,8 +121,14 @@ def find_duplicate_groups(
     match C, while A and C fall just outside the threshold. Collect all edges
     first, then merge connected components, otherwise chain duplicates get
     skipped once the middle image is marked as "already seen".
+
+    Queries are processed in blocks of rows against the upper triangle of the
+    distance matrix, so the whole N x N search is a handful of large GEMM-like
+    kernels instead of N memory-bound one-vs-all passes. ``t`` is a tqdm-like
+    progress object with ``update(n)`` and ``write(msg)``.
     """
-    parent = list(range(len(image_paths)))
+    n = len(image_paths)
+    parent = list(range(n))
 
     def find(idx: int) -> int:
         while parent[idx] != idx:
@@ -136,25 +142,19 @@ def find_duplicate_groups(
         if left_root != right_root:
             parent[right_root] = left_root
 
-    for idx, image_path in enumerate(t):
-        image_embedding = embeddings_db[idx]  # shape (D)
-
-        # Search only the upper-triangular slice to avoid duplicate work. The
-        # query image is not inside this slice, so self-filtering must be
-        # disabled with image_idx=-1.
-        database_slice_torch = embeddings_torch[idx + 1 :]
-        if database_slice_torch.size(0) == 0:
-            continue
-
-        similar_images = find_similar_images_euclidean(-1, image_embedding, database_slice_torch, threshold=threshold)
-        if not similar_images:
-            continue
-
-        similar_images = [(s_idx + idx + 1, sim) for s_idx, sim in similar_images]
-        similar_images_paths = [(image_paths[s_idx], sim) for s_idx, sim in similar_images]
-        t.write(f"Found {len(similar_images)} duplicates for {image_path}: {similar_images_paths}")
-        for s_idx, _ in similar_images:
-            union(idx, s_idx)
+    for start, end in index.iter_blocks():
+        ii, jj, dd = find_close_pairs_self(index, threshold, start, end)
+        if len(ii):
+            # Report per query image, like the old one-vs-all loop did.
+            order = np.lexsort((jj, ii))
+            ii, jj, dd = ii[order], jj[order], dd[order]
+            for i in np.unique(ii):
+                sel = ii == i
+                matches = [(image_paths[int(j)], float(d)) for j, d in zip(jj[sel], dd[sel])]
+                t.write(f"Found {len(matches)} duplicates for {image_paths[int(i)]}: {matches}")
+            for i, j in zip(ii.tolist(), jj.tolist()):
+                union(i, j)
+        t.update(end - start)
 
     groups_by_root: dict[int, List[str]] = {}
     for idx, image_path in enumerate(image_paths):
@@ -192,11 +192,11 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
     help="Directory containing images to process.",
 )
 @click.option(
-    "--db-dir",
+    "--db",
     "-d",
-    type=click.Path(file_okay=False, dir_okay=True),
+    type=click.Path(dir_okay=False),
     required=True,
-    help="Directory to store the database files.",
+    help="SQLite file storing the embedding database.",
 )
 @click.option(
     "--trash-dir",
@@ -209,7 +209,7 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
 @click.option(
     "--clean-orphans/--no-clean-orphans",
     default=True,
-    help="Whether to remove orphaned database files that no longer have corresponding images.",
+    help="Whether to remove database entries whose images no longer exist.",
     show_default=True,
 )
 @click.option("--force-update", "-f", is_flag=True, default=False, help="Force update all images, ignoring modification times.")
@@ -255,7 +255,7 @@ def move_duplicates(dup_group: List[str], root_dir: str, trash_dir: str, keeping
 )
 def main(
     image_dir: str,
-    db_dir: str,
+    db: str,
     model_id: str,
     force_update: bool,
     clean_orphans: bool,
@@ -274,29 +274,29 @@ def main(
         # more than accuracy.
         print("Updating database...")
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
-        update_database(encoder, image_dir, db_dir, force_update, clean_orphans, batch_size=batch_size)
+        update_database(encoder, image_dir, db, force_update, clean_orphans, batch_size=batch_size)
         encoder.cleanup()
         del encoder
         gc.collect()
 
     print("Loading database...")
-    image_paths, database = load_database(db_dir)
-    print(f"Loaded {len(database)} entries in the database.")
-    if len(database) == 0:
+    image_paths, embeddings_db = load_database(db)  # (N, D)
+    print(f"Loaded {len(image_paths)} entries in the database.")
+    if len(image_paths) == 0:
         print("No entries found in the database. Exiting.")
         raise SystemExit(1)
 
-    # put all image paths and embeddings into lists for easier processing
-    print("Preparing embeddings...")
-    embeddings_db = np.stack(database, axis=0)  # (N, D)
-    del database
-    gc.collect()
-    print(f"Embeddings shape: {embeddings_db.shape}, memory size: {humanize.naturalsize(embeddings_db.nbytes, binary=True)}")
-    embeddings_torch = torch.from_numpy(embeddings_db).to(device).float()
+    index = DistanceIndex(embeddings_db, device)
+    del embeddings_db
+    print(
+        f"Embeddings shape: ({index.n}, {index.dim}), device memory: {humanize.naturalsize(index.nbytes, binary=True)}, "
+        f"backend: {index.backend_name()}"
+    )
 
     print("Finding duplicates...")
-    t = tqdm.tqdm(image_paths, desc="Processing images", unit="image")
-    duplicate_groups = find_duplicate_groups(image_paths, embeddings_db, embeddings_torch, threshold, t)
+    t = tqdm.tqdm(total=len(image_paths), desc="Processing images", unit="image")
+    duplicate_groups = find_duplicate_groups(image_paths, index, threshold, t)
+    t.close()
     duplicate_image_count = sum(len(group) - 1 for group in duplicate_groups)
 
     if trash_dir is not None:
@@ -312,8 +312,8 @@ def main(
         f"found {duplicate_image_count} duplicates across {len(duplicate_groups)} groups."
     )
 
-    del embeddings_torch
-    del embeddings_db
+    index.release()
+    del index
     gc.collect()
     torch.cuda.empty_cache()
     torch.compiler.reset()

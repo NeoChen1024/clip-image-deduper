@@ -17,8 +17,9 @@ import tqdm
 from .clip_encoding import CLIPImageEncoder, default_model_id
 from .db_processing import load_database, update_database
 from .similarity import (
+    DistanceIndex,
     default_euclidean_distance_threshold,
-    find_similar_images_euclidean,
+    find_close_pairs_cross,
 )
 
 
@@ -47,11 +48,11 @@ def move_duplicate(image_path: str, root_dir: str, trash_dir: str, dry_run: bool
     help="Directory containing base images to process.",
 )
 @click.option(
-    "--base-db-dir",
+    "--base-db",
     "-bd",
-    type=click.Path(file_okay=False, dir_okay=True),
+    type=click.Path(dir_okay=False),
     required=True,
-    help="Directory to store the base database files.",
+    help="SQLite file storing the base embedding database.",
 )
 @click.option(
     "--import-image-dir",
@@ -61,11 +62,11 @@ def move_duplicate(image_path: str, root_dir: str, trash_dir: str, dry_run: bool
     help="Directory containing import images to process.",
 )
 @click.option(
-    "--import-db-dir",
+    "--import-db",
     "-id",
-    type=click.Path(file_okay=False, dir_okay=True),
+    type=click.Path(dir_okay=False),
     required=True,
-    help="Directory to store the import database files.",
+    help="SQLite file storing the import embedding database.",
 )
 @click.option(
     "--trash-dir",
@@ -78,7 +79,7 @@ def move_duplicate(image_path: str, root_dir: str, trash_dir: str, dry_run: bool
 @click.option(
     "--clean-orphans/--no-clean-orphans",
     default=True,
-    help="Whether to remove orphaned database files that no longer have corresponding images.",
+    help="Whether to remove database entries whose images no longer exist.",
     show_default=True,
 )
 @click.option("--force-update", "-f", is_flag=True, default=False, help="Force update all images, ignoring modification times.")
@@ -116,9 +117,9 @@ def move_duplicate(image_path: str, root_dir: str, trash_dir: str, dry_run: bool
 )
 def main(
     base_image_dir: str,
-    base_db_dir: str,
+    base_db: str,
     import_image_dir: str,
-    import_db_dir: str,
+    import_db: str,
     model_id: str,
     force_update: bool,
     clean_orphans: bool,
@@ -136,50 +137,50 @@ def main(
         # --skip-update and accept potentially stale embeddings.
         encoder = CLIPImageEncoder(model_id=model_id, device=device)
         print("Updating base database...")
-        update_database(encoder, base_image_dir, base_db_dir, force_update, clean_orphans, batch_size=batch_size)
+        update_database(encoder, base_image_dir, base_db, force_update, clean_orphans, batch_size=batch_size)
         print("Updating import database...")
-        update_database(encoder, import_image_dir, import_db_dir, force_update, clean_orphans, batch_size=batch_size)
+        update_database(encoder, import_image_dir, import_db, force_update, clean_orphans, batch_size=batch_size)
         encoder.cleanup()
         del encoder
         gc.collect()
 
-    def db_processing(db_type: str, db_dir: str) -> Tuple[List[str], np.ndarray, torch.Tensor]:
+    def db_processing(db_type: str, db_path: str) -> Tuple[List[str], DistanceIndex]:
         print(f"Loading {db_type} database...")
-        image_paths, database = load_database(db_dir)
-        print(f"Loaded {len(database)} entries in the database.")
-        if len(database) == 0:
+        image_paths, embeddings_db = load_database(db_path)  # (N, D)
+        print(f"Loaded {len(image_paths)} entries in the database.")
+        if len(image_paths) == 0:
             print(f"No entries found in the {db_type} database. Exiting.")
             raise SystemExit(1)
 
-        # put all image paths and embeddings into lists for easier processing
-        print(f"Preparing {db_type} embeddings...")
-        embeddings_db = np.stack(database, axis=0)  # (N, D)
-        del database
-        gc.collect()
+        index = DistanceIndex(embeddings_db, device)
         print(
-            f"Embeddings DB shape of {db_type}: {embeddings_db.shape}, memory size: {humanize.naturalsize(embeddings_db.nbytes, binary=True)}"
+            f"Embeddings DB shape of {db_type}: ({index.n}, {index.dim}), device memory: "
+            f"{humanize.naturalsize(index.nbytes, binary=True)}, backend: {index.backend_name()}"
         )
-        embeddings_torch = torch.from_numpy(embeddings_db).to(device).float()
+        return image_paths, index
 
-        return image_paths, embeddings_db, embeddings_torch
-
-    base_image_paths, base_embeddings_db, base_embeddings_torch = db_processing("base", base_db_dir)
-    import_image_paths, import_embeddings_db, import_embeddings_torch = db_processing("import", import_db_dir)
+    base_image_paths, base_index = db_processing("base", base_db)
+    import_image_paths, import_index = db_processing("import", import_db)
 
     print("Finding duplicates...")
     duplicate_count = 0
-    t = tqdm.tqdm(import_image_paths, desc="Processing import images", unit="image")
+    t = tqdm.tqdm(total=len(import_image_paths), desc="Processing import images", unit="image")
 
-    for idx, image_path in enumerate(t):
-        image_embedding = import_embeddings_db[idx]  # shape (D)
-
-        similar_images = find_similar_images_euclidean(-1, image_embedding, base_embeddings_torch, threshold=threshold)
-        if similar_images:
-            similar_images_paths = [(base_image_paths[s_idx], sim) for s_idx, sim in similar_images]
-            t.write(f"Found {len(similar_images)} instances for {image_path}: {similar_images_paths}")
-            duplicate_count += len(similar_images)
-            if trash_dir is not None:
-                move_duplicate(image_path, import_image_dir, trash_dir, dry_run, t)
+    for start, end in import_index.iter_blocks(other=base_index):
+        ii, jj, dd = find_close_pairs_cross(import_index, base_index, threshold, start, end)
+        if len(ii):
+            order = np.lexsort((jj, ii))
+            ii, jj, dd = ii[order], jj[order], dd[order]
+            for i in np.unique(ii):
+                sel = ii == i
+                image_path = import_image_paths[int(i)]
+                matches = [(base_image_paths[int(j)], float(d)) for j, d in zip(jj[sel], dd[sel])]
+                t.write(f"Found {len(matches)} instances for {image_path}: {matches}")
+                duplicate_count += len(matches)
+                if trash_dir is not None:
+                    move_duplicate(image_path, import_image_dir, trash_dir, dry_run, t)
+        t.update(end - start)
+    t.close()
 
     dry_run_str = ""
     if dry_run:
@@ -187,10 +188,9 @@ def main(
 
     print(f"Deduplication complete., processed {len(import_image_paths)} images, found {duplicate_count} duplicates.{dry_run_str}")
 
-    del base_embeddings_torch
-    del import_embeddings_torch
-    del base_embeddings_db
-    del import_embeddings_db
+    base_index.release()
+    import_index.release()
+    del base_index, import_index
     gc.collect()
     torch.cuda.empty_cache()
     torch.compiler.reset()

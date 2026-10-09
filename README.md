@@ -4,15 +4,16 @@
 
 My own CLIP-based image deduplication toolkit born from dissatisfaction with off-the-shelf solutions. (most of them are either slow, or not suitable for processing my own image directories) It's purely command-line, batch processing (not interactive), designed to handle image datasets so large, that typing `ls` inside the directory will take more than 5 seconds for the listing to be done.
 
-Because of its simplicity (less than 1k lines of Python), processing is all done in memory, which limits how many images it can handle in low-memory systems. (it takes about 5KiB of VRAM and system RAM for each image for a single FP32 embedding)
+Because of its simplicity (about 1k lines of Python), processing is all done in memory, which limits how many images it can handle in low-memory systems. Embeddings are stored and held on the GPU in FP16, so each image costs about 2.5KiB of VRAM and system RAM for a 1152-dimensional embedding; a 1M-image database fits in about 2.5GiB.
 
 ## Key features
 
 * High performance (as fast as humanly possible on image encoding and matching)
-* Incremental embedding DB (filesystem-as-db) with mtime-based updates and orphan cleanup
+* Incremental embedding DB (a single SQLite file, FP16) with mtime-based updates, orphan cleanup, and model-id checking
 * Multiple duplicate-keeping strategies (newest, largest, highest-quality, pic-dir, can be extended quite easily)
-* GPU support, image embedding comparison is more than 10x faster on GPU (memory-BW bound)
-* async batched model inference (about 1.5x speedup) and multiprocessing DB loading (about 2x speedup).
+* GPU support: matching 100k images against each other takes about a second on an RTX 4080-class GPU
+* Exact distances: on CUDA a small Triton kernel reads FP16 embeddings and computes `sum((a-b)^2)` in FP32 directly, avoiding the `|a|^2+|b|^2-2ab` cancellation that costs `torch.cdist` ~1e-2 of precision on unnormalized CLIP embeddings
+* async batched model inference (about 1.5x speedup)
 
 ## Installation
 
@@ -57,13 +58,13 @@ It installs the following commands:
 Dedupe images in a directory:
 
 ```shell
-$ clip-image-deduper -i pic-dir -d db-dir -t trash-dir
+$ clip-image-deduper -i pic-dir -d pic.sqlite -t trash-dir
 ```
 
 Dedupe images in an "importing" dir with "base" dir (will remove images from "importing" when same image is found in "base"):
 
 ```shell
-$ clip-image-import-deduper -bi pic-dir -bd pic-db-dir -ii importing -id import-db-dir -t trash-dir
+$ clip-image-import-deduper -bi pic-dir -bd pic.sqlite -ii importing -id import.sqlite -t trash-dir
 ```
 
 ### Important CLI options (clip-image-deduper)
@@ -71,20 +72,29 @@ $ clip-image-import-deduper -bi pic-dir -bd pic-db-dir -ii importing -id import-
 Only the most important flags are listed here; run `clip-image-deduper --help` for the full reference.
 
 * `-i, --image-dir`: Directory containing images to process.
-* `-d, --db-dir`: Directory to store the embedding database files (mirrors image-dir structure).
+* `-d, --db`: SQLite file storing the embedding database (created if missing). A database is bound to the model it was encoded with; switching `--model-id` requires `--force-update`.
 * `-t, --trash-dir`: Where duplicates are moved. If omitted, files are not moved.
 * `--threshold, -th`: Euclidean distance threshold for considering images as duplicates. Default: `0.1` (lower = stricter).
 * `--keeping-logic, -kl`: Which copy to keep among duplicates: `newest`, `largest`, `highest-quality`, or `pic-dir`.
 * `--device, -c`: Device to run the CLIP model on, e.g. `cuda` or `cpu`. Defaults to `cuda` if available.
 * `--batch-size, -b`: Batch size for image encoding. Adjust based on VRAM.
-* `--dry-run, -n`: Show what would be moved without moving image files. Embedding DB files are still refreshed unless you also pass `--skip-update`.
+* `--dry-run, -n`: Show what would be moved without moving image files. The embedding DB is still refreshed unless you also pass `--skip-update`.
 
 ## DB Structure & How It Works
 
-The "db" is a directory containing image embeddings that mirrors the image directory structure.
-For each image file, there is a corresponding `.npz` file containing the embedding, with key `"clip_embedding"`. The `.npz` extension is added to the original image filename, e.g. `picdir/dir-a/image.jpg` -> `dbdir/dir-a/image.jpg.npz`.
+The "db" is a single SQLite file. Table `embeddings` has one row per image: `path` (relative to the image dir, primary key), `mtime` and `size` of the image when it was encoded, and `embedding`, the raw little-endian float16 vector as a BLOB. Table `meta` records `model_id`, `dim`, `dtype` and `schema_version`. FP16 is lossless here: CLIP models run in FP16 on CUDA, so every output value is already exactly representable.
 
-It uses euclidean distance to calculate similarity (in FP32). (extremely low arithmetic intensity, memory-BW bound)
+On update, the stored mtimes are compared with the files on disk: images with a changed mtime or no row get (re)encoded, rows whose image no longer exists are deleted (`--clean-orphans`). Loading concatenates all BLOBs and reinterprets them as one `(N, D)` float16 array with no per-row parsing. Writes are committed per encoding batch, so an interrupted run keeps its progress.
+
+### Matching
+
+Matching is done in blocks of query rows against the (upper triangle of the) whole database, so it is a few hundred large kernel launches instead of one memory-bound pass per image. Block size is chosen so a distance block stays under 256MiB.
+
+* On CUDA with Triton available (it ships with PyTorch on Linux), the database lives on the GPU as FP16 and `l2_triton.py` computes exact L2 distances with FP32 arithmetic from the FP16 values, i.e. no `|a|^2+|b|^2-2ab` cancellation. Error vs. float64 is ~1e-5.
+* Otherwise (CPU, or CUDA without Triton) the database is upcast to FP32 and `torch.cdist` is used. Its matmul form loses ~1e-2 of absolute precision near zero distance for embeddings of norm ~16, which has not been observed to change any decision at the default threshold, but is why the Triton path exists.
+
+Peak VRAM for 100k images is about 0.7GiB on the Triton path and 1.1GiB on the `torch.cdist` path.
+
 
 ## Roadmap:
 
