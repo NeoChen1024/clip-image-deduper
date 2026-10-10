@@ -51,17 +51,13 @@ FILTERS = ("all", "pending", "decided", "skipped", "applied", "stale")
 class ReviewWindow(QMainWindow):
     """One review database, one image directory."""
 
-    def __init__(
-        self, review_path: str, image_dir: str | None = None, trash_dir: str | None = None, policy: Policy | None = None, *, prefetch: int = 2
-    ):
+    def __init__(self, review_path: str, image_dir: str | None = None, trash_dir: str | None = None, *, policies: dict[str, Policy] | None = None, prefetch: int = 2):
         super().__init__()
         self.review = ReviewDB(review_path)
         self.image_dir = image_dir or self.review.get_meta("image_dir") or "."
         self.trash_dir = trash_dir
-        if policy is None:
-            policies = load_policies()
-            policy = policies.get(self.review.get_meta("policy") or "largest") or policies["largest"]
-        self.policy = policy
+        self.policies = policies or load_policies()
+        self.policy = self.policies.get(self.review.get_meta("policy") or "largest") or next(iter(self.policies.values()))
         self.setWindowTitle(f"Duplicate review — {os.path.basename(review_path)}")
         self.resize(1500, 950)
 
@@ -113,6 +109,15 @@ class ReviewWindow(QMainWindow):
         self.filter.setCurrentText("all")
         self.filter.currentTextChanged.connect(lambda _: self.reload_groups())
         bar.addWidget(self.filter)
+        bar.addWidget(QLabel(" Policy "))
+        self.policy_box = QComboBox()
+        for name, policy in self.policies.items():
+            self.policy_box.addItem(name)
+            self.policy_box.setItemData(self.policy_box.count() - 1, policy.description or name, Qt.ItemDataRole.ToolTipRole)
+        self.policy_box.setCurrentText(self.policy.name)
+        self.policy_box.setToolTip("Keeping policy used by Policy pick (P); remembered in the review database")
+        self.policy_box.currentTextChanged.connect(self._policy_chosen)
+        bar.addWidget(self.policy_box)
         bar.addSeparator()
         self.mode_group = QActionGroup(self)
         self.mode_group.setExclusive(True)
@@ -137,7 +142,7 @@ class ReviewWindow(QMainWindow):
         bar.addSeparator()
         self._action(bar, "Previous (Z)", lambda: self.navigate(-1), "Alt+Left")
         self._action(bar, "Next (X)", lambda: self.navigate(1), "Alt+Right")
-        self._action(bar, "Policy pick (P)", self.reset_policy)
+        self._action(bar, "Policy pick (P)", self.reset_pending_to_policy)
         self._action(bar, "Undo (U)", self.undo)
         bar.addSeparator()
         self._action(bar, "Apply…", self.apply_dialog, "Ctrl+Return")
@@ -381,6 +386,8 @@ class ReviewWindow(QMainWindow):
             return
         i = item.data(Qt.ItemDataRole.UserRole)
         keep = item.checkState() == Qt.CheckState.Checked
+        if i is None or not (0 <= i < len(self.members)) or self.members[i].keep == keep:
+            return  # itemChanged also fires for text/icon updates; only a real keep change is a decision
         self._decide(keeps={self.members[i].path: keep})
 
     def _member_clicked(self, item: QListWidgetItem | None) -> None:
@@ -425,12 +432,16 @@ class ReviewWindow(QMainWindow):
         path, image = result
         self.pending_loads.discard(path)
         self.thumbs.put(path, QPixmap.fromImage(image))
-        for row in range(self.member_list.count()):
-            item = self.member_list.item(row)
-            if self.members and self.members[item.data(Qt.ItemDataRole.UserRole)].path == path:
-                pix = self.thumbs.get(path)
-                if pix is not None:
-                    item.setIcon(QIcon(pix))
+        self.member_list.blockSignals(True)  # setIcon emits itemChanged, which would look like a keep change
+        try:
+            for row in range(self.member_list.count()):
+                item = self.member_list.item(row)
+                if self.members and self.members[item.data(Qt.ItemDataRole.UserRole)].path == path:
+                    pix = self.thumbs.get(path)
+                    if pix is not None:
+                        item.setIcon(QIcon(pix))
+        finally:
+            self.member_list.blockSignals(False)
 
     def _thumbnail_failed(self, path: str, error: str) -> None:
         self.pending_loads.discard(path)
@@ -550,7 +561,15 @@ class ReviewWindow(QMainWindow):
         if self.members:
             self._decide(keeps={m.path: i == self.a for i, m in enumerate(self.members)})
 
+    def _policy_chosen(self, name: str) -> None:
+        if name in self.policies:
+            self.policy = self.policies[name]
+            self.review.set_meta("policy", name)
+            self.review.conn.commit()
+            self.message(f"Policy pick (P) now uses '{name}'")
+
     def reset_policy(self) -> None:
+        """Reset the current group's keeps to the policy's choice (Shift+P)."""
         if self.current is None:
             return
         try:
@@ -559,6 +578,27 @@ class ReviewWindow(QMainWindow):
             self.message(str(e))
             return
         self._after_change()
+
+    def reset_pending_to_policy(self, *, confirm: bool = True) -> None:
+        """Reset the keeps of every pending group to the policy's choice (P). Statuses stay pending; each group gets
+        its own history step, so U still undoes it group by group."""
+        n = self.review.counts()["pending"]
+        if n == 0:
+            self.message("No pending groups")
+            return
+        if confirm:
+            answer = QMessageBox.question(
+                self,
+                "Policy pick",
+                f"Reset the keeps of {n:,} pending group(s) to the choice of policy '{self.policy.name}'?\n\nDecided, skipped and applied groups are not touched.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        changed = self.review.reset_pending_to_policy(self.policy)
+        self.reload_groups(select_id=self.current.id if self.current else None)
+        self.message(f"Reset {changed:,} pending group(s) to policy '{self.policy.name}'")
 
     def decide_and_next(self) -> None:
         if self.current is None:
@@ -703,7 +743,7 @@ class ReviewWindow(QMainWindow):
         elif key == Qt.Key.Key_K:
             self.keep_only_a() if shift else self.toggle_keep_a()
         elif key == Qt.Key.Key_P:
-            self.reset_policy()
+            self.reset_policy() if shift else self.reset_pending_to_policy()
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.decide_and_next()
         elif key == Qt.Key.Key_C:
@@ -776,7 +816,8 @@ HELP_HTML = """
 <tr><td><b>Shift+1-9</b></td><td>Show member n as B (Shift+click)</td></tr>
 <tr><td><b>K</b></td><td>Toggle keep on A</td></tr>
 <tr><td><b>Shift+K</b></td><td>Keep only A</td></tr>
-<tr><td><b>P</b></td><td>Reset keeps to the keeping policy's choice</td></tr>
+<tr><td><b>P</b></td><td>Reset the keeps of <i>all pending groups</i> to the selected policy's choice (asks first)</td></tr>
+<tr><td><b>Shift+P</b></td><td>Reset this group's keeps to the policy's choice</td></tr>
 </table>
 <h3>Canvas</h3>
 <table cellspacing="6">

@@ -154,7 +154,8 @@ others stale.
 image views in the middle (side by side, flip while holding Space, or an amplified difference), members with
 thumbnails and keep checkboxes on the right. Z/X move between groups, 1-9 pick which member is shown as A
 (Shift+1-9 for B), K toggles keep on A, Enter marks the group decided and jumps to the next pending one, U undoes,
-F1 lists everything. Decisions are committed to the review database as they are made. **Apply** (Ctrl+Enter) lists
+F1 lists everything. The keeping policy is chosen in the toolbar (custom ones via `--keeping-config`); P resets the
+keeps of every pending group to its choice, Shift+P only the current group's. Decisions are committed to the review database as they are made. **Apply** (Ctrl+Enter) lists
 every move, then moves the losers of decided groups to the trash directory; groups whose files changed on disk since
 matching are refused, and an applied group can be undone while the trash directory is untouched. Nothing is ever
 deleted. `review-status` and `review-apply` do the same from the CLI.

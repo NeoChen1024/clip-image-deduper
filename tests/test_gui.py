@@ -93,7 +93,7 @@ class GuiTests(unittest.TestCase):
         self.key(Qt.Key.Key_K, Qt.KeyboardModifier.ShiftModifier)
         with ReviewDB(self.review_path) as db:
             self.assertEqual({m.path: m.keep for m in db.members(self.win.current.id)}, {"a.png": False, "sub/b.png": True})
-        self.key(Qt.Key.Key_P)
+        self.key(Qt.Key.Key_P, Qt.KeyboardModifier.ShiftModifier)  # this group only
         with ReviewDB(self.review_path) as db:
             self.assertEqual({m.path: m.keep for m in db.members(self.win.current.id)}, {"a.png": True, "sub/b.png": False})
         self.key(Qt.Key.Key_U)
@@ -213,6 +213,28 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.win.direction, -1)
         self.assertIn("c.png", self.win.images)
         self.assertEqual(self.win.canvas.left.image_size, (40, 40))
+
+    def test_viewing_a_group_writes_no_history(self):
+        self.key(Qt.Key.Key_X)
+        self.key(Qt.Key.Key_Z)
+        with ReviewDB(self.review_path) as db:
+            self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM history").fetchone()[0], 2)  # one creation snapshot per group
+
+    def test_policy_pick_resets_all_pending_groups(self):
+        pending = next(g for g in self.win.groups_model.groups if g.status == "pending")  # a.png (40x30) / sub/b.png (20x15)
+        with ReviewDB(self.review_path) as db:
+            db.decide(pending.id, keeps={"a.png": False, "sub/b.png": True})
+        self.win.reload_groups(select_id=pending.id)
+        self.win.policy_box.setCurrentText("largest")
+        self.win.reset_pending_to_policy(confirm=False)
+        self.win.wait_idle()
+        with ReviewDB(self.review_path) as db:
+            self.assertEqual({m.path: m.keep for m in db.members(pending.id)}, {"a.png": True, "sub/b.png": False})
+            self.assertEqual(db.group(pending.id).status, "pending")  # keeps only; still to be reviewed
+            self.assertEqual(db.get_meta("policy"), "largest")
+        self.key(Qt.Key.Key_U)
+        with ReviewDB(self.review_path) as db:
+            self.assertEqual({m.path: m.keep for m in db.members(pending.id)}, {"a.png": False, "sub/b.png": True})
 
     def test_filter(self):
         self.win.filter.setCurrentText("pending")

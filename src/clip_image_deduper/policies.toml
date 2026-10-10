@@ -46,10 +46,11 @@ description = "Wallpaper folders first, then by source site (Pixiv > yande.re > 
 criteria = [
     { attr = "dirname", match = 'Wallpaper' },
     { attr = "basename", match = [
-        '^[0-9]+_p[0-9]+\.',            # Pixiv: 12345678_p0.jpg
-        '^yande\.re [0-9]+ ',           # yande.re 123456 tag tag.jpg
-        '^__.*__[0-9a-f]{32}\.',        # Danbooru: __character_series__<md5>.jpg
-        '^Konachan\.com - [0-9]+ ',     # Konachan.com - 123456 tag tag.jpg
+        '^[0-9]+_p[0-9]+\.',	# Pixiv: 12345678_p0.jpg
+        '^yandere_[0-9]+_[0-9a-f]{32}\.',	# yandere_123456_<md5>.jpg
+        '^yande\.re [0-9]+ ',	# yande.re 123456 tag tag.jpg
+        '^__.*__[0-9a-f]{32}\.',	# Danbooru: __character_series__<md5>.jpg
+        '^Konachan\.com - [0-9]+ ',	# Konachan.com - 123456 tag tag.jpg
     ] },
     { attr = "pixels", prefer = "max" },
     { attr = "format", order = ["PNG", "TIFF", "BMP", "WEBP", "AVIF", "JPEG", "GIF"] },

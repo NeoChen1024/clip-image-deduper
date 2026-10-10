@@ -122,7 +122,8 @@ as in the editor. Everything is also reachable from the toolbar / menu, and F1 l
 | D | cycle canvas mode: side by side → flip → diff |
 | K | toggle keep on the member currently shown as A |
 | Shift+K | keep only A (everything else to trash) |
-| P | reset keeps to the policy's choice |
+| P | reset the keeps of all pending groups to the policy chosen in the toolbar (confirmation dialog; U undoes per group) |
+| Shift+P | reset this group's keeps to the policy's choice |
 | Enter | mark group decided and go to the next pending one |
 | C | cycle status pending → decided → skipped |
 | S | skip (same as cycling to skipped) and advance |

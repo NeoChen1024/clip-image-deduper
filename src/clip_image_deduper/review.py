@@ -360,6 +360,15 @@ class ReviewDB:
         winner = policy.select([m.record for m in members])
         self.decide(group_id, keeps={m.path: m.path == winner.path for m in members})
 
+    def reset_pending_to_policy(self, policy: Policy) -> int:
+        """Set the keeps of every pending group to ``policy``'s winner (status unchanged, one history step each).
+        Returns the number of groups changed."""
+        n = 0
+        for g in self.groups(status="pending"):
+            self.reset_to_policy(g.id, policy)
+            n += 1
+        return n
+
     def undo(self, group_id: int) -> bool:
         """Revert the last ``decide`` of a group. Returns False when there is nothing left to undo."""
         rows = self.conn.execute("SELECT id, keep_json, status, note FROM history WHERE group_id = ? ORDER BY id DESC LIMIT 2", (group_id,)).fetchall()
