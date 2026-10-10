@@ -51,7 +51,7 @@ FILTERS = ("all", "pending", "decided", "skipped", "applied", "stale")
 class ReviewWindow(QMainWindow):
     """One review database, one image directory."""
 
-    def __init__(self, review_path: str, image_dir: str | None = None, trash_dir: str | None = None, *, policies: dict[str, Policy] | None = None, prefetch: int = 2):
+    def __init__(self, review_path: str, image_dir: str | None = None, trash_dir: str | None = None, *, policies: dict[str, Policy] | None = None, prefetch: int = 3):
         super().__init__()
         self.review = ReviewDB(review_path)
         self.image_dir = image_dir or self.review.get_meta("image_dir") or "."
@@ -61,15 +61,21 @@ class ReviewWindow(QMainWindow):
         self.setWindowTitle(f"Duplicate review — {os.path.basename(review_path)}")
         self.resize(1500, 950)
 
+        # Two pools: whatever the current group needs (its images, its diff, thumbnails) never queues behind
+        # prefetch reads, which on a network share can take seconds each.
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(4)
+        self.prefetch_pool = QThreadPool(self)
+        self.prefetch_pool.setMaxThreadCount(3)
         self.prefetch_depth = prefetch
         # Current pair, the previous one, and the prefetched pairs ahead (5000x3000 is ~100 MB per entry).
         self.images: LRU = LRU(2 * (prefetch + 2))  # path -> (PIL image, QImage)
+        self.diffs: LRU = LRU(prefetch + 2)  # (path_a, path_b) -> (overlay QImage, plain QImage)
         self.thumbs: LRU = LRU(300)  # path -> QPixmap
         self.pending_loads: set[str] = set()
         self.loading: dict[str, Job] = {}  # full images in flight or queued, by path
-        self.generation = 0
+        self.diffing: set[tuple[str, str]] = set()  # diffs in flight
+        self.prefetch_pairs: list[tuple[str, str | None]] = []
         self.direction = 1  # last navigation direction, prefetch goes this way
         self.pending_only = False
         self.shown: tuple[str, str | None] | None = None
@@ -78,7 +84,6 @@ class ReviewWindow(QMainWindow):
         self.members: list[MemberRow] = []
         self.a = 0
         self.b = 1
-        self.diff_key: tuple[str, str] | None = None
 
         self._build_toolbar()
         self._build_panes()
@@ -269,7 +274,6 @@ class ReviewWindow(QMainWindow):
         self.a = keeps[0] if keeps else 0
         edges = self.review.edges(group.id)
         self.b = self._nearest(self.a, edges)
-        self.diff_key = None
         self.note.blockSignals(True)
         self.note.setText(group.note)
         self.note.blockSignals(False)
@@ -302,18 +306,17 @@ class ReviewWindow(QMainWindow):
         rows = range(row + 1, self.groups_model.rowCount()) if self.direction > 0 else range(row - 1, -1, -1)
         if self.pending_only:
             rows = (r for r in rows if self.groups_model.groups[r].status == "pending")  # type: ignore[assignment]
-        wanted: list[str] = []
-        for r in itertools.islice(rows, self.prefetch_depth):
-            wanted.extend(p for p in self._pair_of(self.groups_model.groups[r]) if p)
+        self.prefetch_pairs = [self._pair_of(self.groups_model.groups[r]) for r in itertools.islice(rows, self.prefetch_depth)]
+        wanted = [p for pair in self.prefetch_pairs for p in pair if p]
         current = {self.members[self.a].path, self.members[self.b].path} if self.members else set()
         for path, job in list(self.loading.items()):
-            if path not in wanted and path not in current:
-                job.cancel()  # a no-op if it already started; its result is then simply cached
-                del self.loading[path]
+            if path not in wanted and path not in current and job.cancel():
+                del self.loading[path]  # one that already started finishes and lands in the cache
         for path in wanted:
-            self._load_image(path, priority=0)
+            self._load_image(path, self.prefetch_pool)
+        self._prefetch_diffs()
 
-    def _load_image(self, path: str, *, priority: int) -> None:
+    def _load_image(self, path: str, pool: QThreadPool) -> None:
         if path in self.images or path in self.loading:
             return
         full = os.path.join(self.image_dir, path)
@@ -324,7 +327,7 @@ class ReviewWindow(QMainWindow):
 
         job = Job(read).connect(self._image_loaded, lambda error: self._image_failed(path, error))
         self.loading[path] = job
-        self.pool.start(job, priority)
+        pool.start(job)
 
     def _nearest(self, i: int, edges: list[tuple[str, str, float]]) -> int:
         """The member closest to member ``i`` by the stored edges (edges are sorted by distance), else another one."""
@@ -450,14 +453,13 @@ class ReviewWindow(QMainWindow):
 
     def _request_images(self) -> None:
         """Load A and B (cached or off-thread) and show them when both are in."""
-        self.generation += 1
         self.shown = None
         if not self.members:
             self.canvas.clear()
             return
         for path in (self.members[self.a].path, self.members[self.b].path if self.b != self.a else None):
             if path is not None:
-                self._load_image(path, priority=1)  # ahead of any prefetch
+                self._load_image(path, self.pool)
         self._show_images()
 
     def _image_loaded(self, result) -> None:
@@ -465,6 +467,7 @@ class ReviewWindow(QMainWindow):
         self.loading.pop(path, None)
         self.images.put(path, (im, image))
         self._show_images()
+        self._prefetch_diffs()
 
     def _image_failed(self, path: str, error: str) -> None:
         self.loading.pop(path, None)
@@ -489,28 +492,55 @@ class ReviewWindow(QMainWindow):
         if self.canvas.mode == "diff":
             self._request_diff()
 
-    def _request_diff(self) -> None:
+    def _current_pair(self) -> tuple[str, str] | None:
         if not self.members or self.b == self.a:
+            return None
+        return self.members[self.a].path, self.members[self.b].path
+
+    def _request_diff(self) -> None:
+        """Show the current pair's diff: from the cache, or computed in the main pool."""
+        pair = self._current_pair()
+        if pair is None:
             self.canvas.set_diff(None)
             return
-        pa, pb = self.members[self.a].path, self.members[self.b].path
-        if self.diff_key == (pa, pb):
+        cached = self.diffs.get(pair)
+        if cached is not None:
+            self.canvas.set_diff(*cached)
             return
-        ca, cb = self.images.get(pa), self.images.get(pb)
+        self._compute_diff(pair, self.pool)
+
+    def _prefetch_diffs(self) -> None:
+        """In diff mode, compute the diffs of the prefetched pairs whose images are both in: a diff of a large
+        pair costs a visible fraction of a second, the same as a cold read."""
+        if self.canvas.mode != "diff":
+            return
+        for pa, pb in self.prefetch_pairs:
+            if pb is not None:
+                self._compute_diff((pa, pb), self.prefetch_pool)
+
+    def _compute_diff(self, pair: tuple[str, str], pool: QThreadPool) -> None:
+        if pair in self.diffs or pair in self.diffing:
+            return
+        ca, cb = self.images.get(pair[0]), self.images.get(pair[1])
         if ca is None or cb is None or ca[0] is None or cb[0] is None:
-            return
-        self.diff_key = (pa, pb)
-        generation = self.generation
+            return  # images not loaded (yet), or unreadable
+        self.diffing.add(pair)
         a_im, b_im = ca[0], cb[0]
 
         def compute(signals):
             return diff_images(a_im, b_im)
 
-        self.pool.start(Job(compute).connect(lambda images, g=generation, k=(pa, pb): self._diff_ready(images, g, k), lambda error: self.message(f"Diff failed: {error}")))
+        pool.start(Job(compute).connect(lambda images: self._diff_ready(pair, images), lambda error: self._diff_failed(pair, error)))
 
-    def _diff_ready(self, images, generation: int, key) -> None:
-        if generation == self.generation and self.diff_key == key:
+    def _diff_ready(self, pair: tuple[str, str], images) -> None:
+        self.diffing.discard(pair)
+        self.diffs.put(pair, images)
+        if self.canvas.mode == "diff" and self._current_pair() == pair:
             self.canvas.set_diff(*images)
+
+    def _diff_failed(self, pair: tuple[str, str], error: str) -> None:
+        self.diffing.discard(pair)
+        self.message(f"Diff failed: {error}")
 
     def _zoom_changed(self, state: str) -> None:
         for name, action in self.zoom_actions.items():
@@ -520,12 +550,15 @@ class ReviewWindow(QMainWindow):
         self.mode_actions[mode].setChecked(True)
         if mode == "diff":
             self._request_diff()
+            self._prefetch_diffs()
 
     def wait_idle(self) -> None:
         """Block until background jobs have finished and their results were delivered (for tests)."""
-        self.pool.waitForDone()
-        QApplication.processEvents()
-        QApplication.processEvents()
+        for _ in range(3):  # a delivered image can start a diff; a delivered diff is the end of the chain
+            self.pool.waitForDone()
+            self.prefetch_pool.waitForDone()
+            QApplication.processEvents()
+            QApplication.processEvents()
 
     # -- decisions -----------------------------------------------------------------------------------------------------
 
@@ -787,7 +820,10 @@ class ReviewWindow(QMainWindow):
         self.help_dialog.activateWindow()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        for job in self.loading.values():
+            job.cancel()
         self.pool.waitForDone()
+        self.prefetch_pool.waitForDone()
         self.review.close()
         super().closeEvent(event)
 

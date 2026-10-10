@@ -236,6 +236,23 @@ class GuiTests(unittest.TestCase):
         with ReviewDB(self.review_path) as db:
             self.assertEqual({m.path: m.keep for m in db.members(pending.id)}, {"a.png": False, "sub/b.png": True})
 
+    def test_diff_is_prefetched_and_reused(self):
+        self.win.canvas.set_mode("diff")
+        self.win.wait_idle()
+        self.assertEqual(sorted(self.win.diffs._d), [("a.png", "sub/b.png"), ("d.png", "c.png")])  # current and the group ahead
+        import clip_image_deduper.gui.window as w
+
+        calls = []
+        original = w.diff_images
+        w.diff_images = lambda a, b: calls.append(1) or original(a, b)
+        try:
+            self.key(Qt.Key.Key_X)
+            self.assertIsNotNone(self.win.canvas.diff)
+            self.assertEqual(self.win.canvas.left.image_size, (40, 30))
+        finally:
+            w.diff_images = original
+        self.assertEqual(calls, [])  # served from the cache
+
     def test_filter(self):
         self.win.filter.setCurrentText("pending")
         self.win.wait_idle()
